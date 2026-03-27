@@ -258,6 +258,64 @@ class Executor:
         signed = Account.sign_message(encoded, private_key=self.cfg.private_key)
         return signed.signature.hex()
 
+    # ── Cancel order via API ──────────────────────────────────────────
+
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel a single order by ID. Returns True on success."""
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(
+                f"{self.cfg.api_base}/orders/{order_id}",
+                headers={"X-API-Key": self.cfg.api_key},
+            ) as resp:
+                if resp.status == 200:
+                    log.info("Cancelled order %s", order_id)
+                    return True
+                else:
+                    text = await resp.text()
+                    log.error("Cancel failed for %s (%d): %s", order_id, resp.status, text)
+                    return False
+
+    async def cancel_and_reprice(
+        self,
+        slug: str,
+        old_yes_order_id: str | None,
+        old_no_order_id: str | None,
+        yes_token: str,
+        no_token: str,
+        new_yes_price: float,
+        new_no_price: float,
+        size: float,
+        exchange_address: str,
+    ) -> tuple[str | None, str | None]:
+        """
+        Cancel existing orders and place new ones at updated prices.
+        Returns (new_yes_order_id, new_no_order_id).
+        """
+        # Cancel old orders
+        if old_yes_order_id:
+            await self.cancel_order(old_yes_order_id)
+        if old_no_order_id:
+            await self.cancel_order(old_no_order_id)
+
+        # Place new orders at updated prices
+        new_yes = await self._place_ask_order(
+            slug=slug, token_id=yes_token,
+            price=new_yes_price, size=size,
+            exchange_address=exchange_address,
+        )
+        new_no = await self._place_ask_order(
+            slug=slug, token_id=no_token,
+            price=new_no_price, size=size,
+            exchange_address=exchange_address,
+        )
+
+        log.info(
+            "[%s] REPRICED: YES=%.3f (id=%s)  NO=%.3f (id=%s)",
+            slug, new_yes_price, new_yes, new_no_price, new_no,
+        )
+        return new_yes, new_no
+
     # ── Execute full flow ─────────────────────────────────────────────
 
     async def execute(self, decision: TradeDecision) -> ExecutionResult:

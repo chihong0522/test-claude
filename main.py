@@ -72,7 +72,7 @@ async def run_cycle(
     for dec in decisions:
         result = await executor.execute(dec)
         if result.success:
-            monitor.track(result, dec.split_amount)
+            monitor.track(result, dec.split_amount, opportunity=dec.opportunity)
             await monitor.subscribe_market(dec.opportunity.slug)
             log.info("[%s] Trade live!", dec.opportunity.slug)
         else:
@@ -86,7 +86,7 @@ async def main_loop(cfg: Config):
     http_client = HttpClient(api_key=cfg.api_key)
     fetcher = MarketFetcher(http_client)
     executor = Executor(cfg, http_client, fetcher)
-    monitor = Monitor(cfg)
+    monitor = Monitor(cfg, executor=executor)
 
     # Start WebSocket monitoring in background
     ws_task = asyncio.create_task(monitor.start())
@@ -95,7 +95,9 @@ async def main_loop(cfg: Config):
         while True:
             try:
                 n = await run_cycle(cfg, fetcher, executor, monitor)
-                await monitor.check_stale_orders()
+                # Fetch fresh snapshots for stale order repricing
+                fresh_snaps = await scan_all(fetcher, cfg)
+                await monitor.check_stale_orders(snapshots=fresh_snaps)
                 log.info(
                     "Cycle done: %d new trades, %d open positions, $%.2f exposure",
                     n, monitor.open_count, monitor.total_exposure,

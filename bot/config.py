@@ -42,6 +42,11 @@ class Config:
     # How long to wait before repricing stale orders (seconds)
     reprice_interval: int = int(os.getenv("REPRICE_INTERVAL", "60"))
 
+    # Midpoint drift threshold — if midpoint moves more than this (in cents),
+    # cancel and reprice to stay within LP reward zone.
+    # e.g. 0.02 = if midpoint moves 2 cents, reprice.
+    midpoint_drift_threshold: float = float(os.getenv("MIDPOINT_DRIFT_THRESHOLD", "0.02"))
+
     # ── Risk ───────────────────────────────────────────────────────────
     max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
     max_exposure_usdc: float = float(os.getenv("MAX_EXPOSURE_USDC", "100"))
