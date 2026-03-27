@@ -276,6 +276,35 @@ class Executor:
                     log.error("Cancel failed for %s (%d): %s", order_id, resp.status, text)
                     return False
 
+    async def get_order_status(self, order_id: str) -> dict | None:
+        """Fetch order state via GET /orders/{id}. Returns dict with 'status', 'remainingSize', 'size', or None on error."""
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.cfg.api_base}/orders/{order_id}",
+                headers={"X-API-Key": self.cfg.api_key},
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("order", data)  # API wraps in "order" envelope (matches _place_ask_order line 194)
+                else:
+                    text = await resp.text()
+                    log.warning("get_order_status failed for %s (%d): %s", order_id, resp.status, text)
+                    return None
+
+    async def _verify_order_cancelled(self, order_id: str) -> bool:
+        """Confirm via API that an order is no longer active. Returns True if CANCELLED, FILLED, or not found."""
+        data = await self.get_order_status(order_id)
+        if data is None:
+            # HTTP error — cannot confirm state, treat as still active to be safe
+            log.warning("Could not verify cancellation of order %s — treating as still active", order_id)
+            return False
+        status = data.get("status", "").upper()
+        is_safe = status in ("CANCELLED", "FILLED")
+        if not is_safe:
+            log.warning("Order %s still in status=%s after cancel attempt", order_id, status)
+        return is_safe
+
     async def cancel_and_reprice(
         self,
         slug: str,
@@ -290,31 +319,95 @@ class Executor:
     ) -> tuple[str | None, str | None]:
         """
         Cancel existing orders and place new ones at updated prices.
-        Returns (new_yes_order_id, new_no_order_id).
+        Only places a new order if the old one was confirmed cancelled.
+        Returns (new_yes_order_id, new_no_order_id) — either may be None if cancel failed.
         """
-        # Cancel old orders
+        # --- YES side: cancel + verify before placing ---
+        yes_cancel_ok = True  # no old order → safe to place
         if old_yes_order_id:
-            await self.cancel_order(old_yes_order_id)
-        if old_no_order_id:
-            await self.cancel_order(old_no_order_id)
+            yes_cancel_ok = await self.cancel_order(old_yes_order_id)
+            if yes_cancel_ok:
+                yes_cancel_ok = await self._verify_order_cancelled(old_yes_order_id)
+            if not yes_cancel_ok:
+                log.error("[%s] YES cancel UNCONFIRMED for %s — skipping YES reprice", slug, old_yes_order_id)
 
-        # Place new orders at updated prices
-        new_yes = await self._place_ask_order(
-            slug=slug, token_id=yes_token,
-            price=new_yes_price, size=size,
-            exchange_address=exchange_address,
-        )
-        new_no = await self._place_ask_order(
-            slug=slug, token_id=no_token,
-            price=new_no_price, size=size,
-            exchange_address=exchange_address,
-        )
+        # --- NO side: cancel + verify before placing ---
+        no_cancel_ok = True
+        if old_no_order_id:
+            no_cancel_ok = await self.cancel_order(old_no_order_id)
+            if no_cancel_ok:
+                no_cancel_ok = await self._verify_order_cancelled(old_no_order_id)
+            if not no_cancel_ok:
+                log.error("[%s] NO cancel UNCONFIRMED for %s — skipping NO reprice", slug, old_no_order_id)
+
+        # --- Place new orders only where cancel is confirmed ---
+        new_yes = None
+        if yes_cancel_ok:
+            new_yes = await self._place_ask_order(
+                slug=slug, token_id=yes_token,
+                price=new_yes_price, size=size,
+                exchange_address=exchange_address,
+            )
+        else:
+            log.warning("[%s] Skipped YES reprice due to unconfirmed cancel", slug)
+
+        new_no = None
+        if no_cancel_ok:
+            new_no = await self._place_ask_order(
+                slug=slug, token_id=no_token,
+                price=new_no_price, size=size,
+                exchange_address=exchange_address,
+            )
+        else:
+            log.warning("[%s] Skipped NO reprice due to unconfirmed cancel", slug)
 
         log.info(
             "[%s] REPRICED: YES=%.3f (id=%s)  NO=%.3f (id=%s)",
             slug, new_yes_price, new_yes, new_no_price, new_no,
         )
         return new_yes, new_no
+
+    async def emergency_sell_open_side(
+        self,
+        slug: str,
+        open_order_id: str | None,
+        token_id: str,
+        aggressive_price: float,
+        size: float,
+        exchange_address: str,
+    ) -> str | None:
+        """
+        Emergency liquidation for single-side fill exposure.
+        Cancels the open order (if any) and places a new ASK at aggressive_price
+        (below original ask) to attract a quick fill.
+        Returns the new order ID, or None on failure.
+        """
+        if open_order_id:
+            cancelled = await self.cancel_order(open_order_id)
+            if cancelled:
+                verified = await self._verify_order_cancelled(open_order_id)
+                if not verified:
+                    log.error("[%s] Emergency sell aborted: could not verify cancel of %s", slug, open_order_id)
+                    return None
+            else:
+                log.error("[%s] Emergency sell aborted: cancel_order returned False for %s", slug, open_order_id)
+                return None
+
+        new_order_id = await self._place_ask_order(
+            slug=slug,
+            token_id=token_id,
+            price=aggressive_price,
+            size=size,
+            exchange_address=exchange_address,
+        )
+        if new_order_id:
+            log.warning(
+                "[%s] EMERGENCY SELL placed: token=%s price=%.3f id=%s",
+                slug, token_id[:12], aggressive_price, new_order_id,
+            )
+        else:
+            log.error("[%s] EMERGENCY SELL placement failed for token=%s", slug, token_id[:12])
+        return new_order_id
 
     # ── Execute full flow ─────────────────────────────────────────────
 
