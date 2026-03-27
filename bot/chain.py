@@ -1,49 +1,27 @@
-"""Base chain interaction layer — web3 helpers."""
+"""Base chain constants and helpers.
 
-from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware
-from eth_account import Account
+Contract addresses for Limitless on Base mainnet.
+"""
 
-from bot.config import Config
+# Base mainnet chain ID
+CHAIN_ID = 8453
 
+# ── Token contracts ────────────────────────────────────────────────────
+USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+CTF = "0xC9c98965297Bc527861c898329Ee280632B76e18"   # ERC-1155 conditional tokens
 
-class Chain:
-    """Thin wrapper around web3.py for Base chain."""
-
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-        self.w3 = Web3(Web3.HTTPProvider(cfg.base_rpc_url))
-        self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        self.account = Account.from_key(cfg.private_key)
-        assert self.w3.is_connected(), "Cannot connect to Base RPC"
-
-    @property
-    def address(self) -> str:
-        return self.account.address
-
-    def nonce(self) -> int:
-        return self.w3.eth.get_transaction_count(self.address)
-
-    def send_tx(self, tx: dict) -> str:
-        """Sign and broadcast a transaction. Returns tx hash hex."""
-        tx["from"] = self.address
-        tx["nonce"] = self.nonce()
-        tx["chainId"] = 8453  # Base mainnet
-        if "gas" not in tx:
-            tx["gas"] = self.cfg.gas_limit
-        if "maxFeePerGas" not in tx:
-            base_fee = self.w3.eth.get_block("latest")["baseFeePerGas"]
-            tx["maxFeePerGas"] = base_fee * 2
-            tx["maxPriorityFeePerGas"] = self.w3.to_wei(0.001, "gwei")
-
-        signed = self.account.sign_transaction(tx)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-        return tx_hash.hex()
-
-    def wait_receipt(self, tx_hash: str, timeout: int = 120):
-        return self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
-
-    def get_contract(self, address: str, abi: list):
-        return self.w3.eth.contract(
-            address=Web3.to_checksum_address(address), abi=abi
-        )
+# ── Limitless exchange contracts (all 3 versions) ──────────────────────
+EXCHANGES = {
+    "v1": {
+        "exchange": "0xa4409D988CA2218d956BeEFD3874100F444f0DC3",
+        "fee_module": "0x6d8A7D1898306CA129a74c296d14e55e20aaE87D",
+    },
+    "v2": {
+        "exchange": "0xF1De958F8641448A5ba78c01f434085385Af096D",
+        "fee_module": "0xEECD2Cf0FF29D712648fC328be4EE02FC7931c7A",
+    },
+    "v3": {
+        "exchange": "0x05c748E2f4DcDe0ec9Fa8DDc40DE6b867f923fa5",
+        "fee_module": "0x5130c2c398F930c4f43B15635410047cBEa9D6EB",
+    },
+}
