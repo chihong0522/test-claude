@@ -51,6 +51,10 @@ def detect_red_flags(
     if market_liquidity and _trades_in_wide_spread_markets(trades, market_liquidity):
         flags.append("HIGH_SPREAD_MARKETS")
 
+    # 10. Dormant — no trade in last 3 days (can't copy future trades)
+    if metrics.get("days_since_last_trade", 9999) > 3:
+        flags.append("DORMANT")
+
     return flags
 
 
@@ -153,4 +157,5 @@ RED_FLAG_PENALTIES: dict[str, int] = {
     "RECENT_SPIKE": 5,
     "LARGE_POSITION_SIZES": 5,
     "HIGH_SPREAD_MARKETS": 5,
+    "DORMANT": 15,
 }

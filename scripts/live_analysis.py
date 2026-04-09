@@ -137,16 +137,24 @@ async def main():
         # Sort by composite score
         scored_traders.sort(key=lambda x: x["composite_score"], reverse=True)
 
-        # Filter to passing checklist (if enough)
-        passing = [t for t in scored_traders if t["passes_checklist"]]
-        if len(passing) < 5:
-            # If fewer than 5 pass, show top by score regardless
-            top_10 = scored_traders[:10]
-            print(f"  Note: Only {len(passing)} traders pass full checklist (need 200+ trades, 180+ days, etc.)")
-            print(f"  Showing top 10 by score instead")
-        else:
+        # Filter: must have traded within 3 days (active now)
+        active_traders = [t for t in scored_traders if t.get("days_since_last_trade", 9999) <= 3]
+        dormant_traders = [t for t in scored_traders if t.get("days_since_last_trade", 9999) > 3]
+        print(f"  {len(active_traders)} traders active in last 3 days")
+        print(f"  {len(dormant_traders)} traders dormant (skipped — can't copy future trades)")
+
+        # Filter to passing checklist among active
+        passing = [t for t in active_traders if t["passes_checklist"]]
+        if len(passing) >= 5:
             top_10 = passing[:10]
-            print(f"  {len(passing)} traders pass checklist")
+            print(f"  {len(passing)} active traders pass full checklist")
+        elif len(active_traders) >= 5:
+            top_10 = active_traders[:10]
+            print(f"  Only {len(passing)} pass full checklist — showing top 10 active by score")
+        else:
+            # Fall back to all scored if very few active
+            top_10 = scored_traders[:10]
+            print(f"  Few active traders — showing top 10 by score (check 'LastTx' column)")
 
         # ══════════════════════════════════════════════════════════════════
         # Step 4: Display top-10 results
@@ -156,22 +164,24 @@ async def main():
         print("=" * 80)
 
         print(f"\n{'#':>3} {'Tier':>4} {'Name':<22} {'Score':>6} {'ROI':>8} {'WR':>6} "
-              f"{'PF':>6} {'Sharpe':>7} {'Liq':>5} {'Trades':>7} {'Flags':>6}")
-        print("-" * 95)
+              f"{'PF':>6} {'Liq':>5} {'Trades':>7} {'LastTx':>7} {'Flags':>6}")
+        print("-" * 98)
 
         for i, t in enumerate(top_10):
             flags = len(t.get("red_flags", []))
             flag_str = f"{flags}" if flags > 0 else "-"
             check = "✓" if t["passes_checklist"] else " "
+            days_ago = t.get("days_since_last_trade", "?")
+            last_tx = f"{days_ago}d" if isinstance(days_ago, int) else "?"
 
             print(f"{i+1:>3} [{t['tier']}] {check} {t['name'][:20]:<20s} "
                   f"{t['composite_score']:6.1f} "
                   f"{t['roi']*100:7.1f}% "
                   f"{t['win_rate']*100:5.1f}% "
                   f"{t['profit_factor']:5.2f} "
-                  f"{t['sharpe_ratio']:7.2f} "
                   f"{t['liquidity_score']*100:4.0f}% "
                   f"{t['trade_count']:>6} "
+                  f"{last_tx:>6} "
                   f"{flag_str:>5}")
 
         # ══════════════════════════════════════════════════════════════════
@@ -199,6 +209,7 @@ async def main():
             print(f"  Trade Count:      {t['trade_count']}")
             print(f"  Active Days:      {t['active_days']}")
             print(f"  History Span:     {t['time_span_days']} days")
+            print(f"  Last Trade:       {t.get('days_since_last_trade', '?')} days ago")
             print(f"  Unique Markets:   {t['unique_markets']}")
             print(f"  Liquidity Score:  {t['liquidity_score']*100:.0f}%")
             print(f"  Position Sizing:  {t['position_sizing_score']*100:.0f}%")

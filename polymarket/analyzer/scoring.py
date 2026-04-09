@@ -25,6 +25,7 @@ def score_trader(
     tc = m.trade_count(trades)
     ts_days = m.time_span_days(trades)
     ad = m.active_days(trades)
+    days_inactive = m.days_since_last_trade(trades)
     um = m.unique_markets(trades)
     tv = m.total_volume(trades)
     net_profit = m.compute_net_profit(closed_positions)
@@ -46,6 +47,7 @@ def score_trader(
         "trade_count": tc,
         "active_days": ad,
         "time_span_days": ts_days,
+        "days_since_last_trade": days_inactive,
         "total_volume": tv,
         "unique_markets": um,
         "net_profit": net_profit,
@@ -149,6 +151,8 @@ def _passes_checklist(metrics: dict, red_flags: list[str]) -> bool:
     if metrics["unique_markets"] < 5:
         return False
     if metrics["liquidity_score"] < 0.70:
+        return False
+    if metrics.get("days_since_last_trade", 9999) > 3:
         return False
     # Critical red flags fail the checklist
     critical = {"WIN_RATE_SUSPICIOUS", "SHARPE_OVERFITTING"}

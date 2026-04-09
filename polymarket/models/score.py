@@ -21,6 +21,7 @@ class TraderScore(Base):
     time_span_days: Mapped[int] = mapped_column(Integer, default=0)
     total_volume: Mapped[float] = mapped_column(Float, default=0.0)
     unique_markets: Mapped[int] = mapped_column(Integer, default=0)
+    days_since_last_trade: Mapped[int] = mapped_column(Integer, default=9999)
 
     # Performance
     net_profit: Mapped[float] = mapped_column(Float, default=0.0)

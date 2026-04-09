@@ -35,6 +35,17 @@ def active_days(trades: list[dict]) -> int:
     return len(days)
 
 
+def days_since_last_trade(trades: list[dict]) -> int:
+    """Days since the most recent trade. 0 = traded today."""
+    if not trades:
+        return 9999
+    timestamps = [int(t.get("timestamp", 0)) for t in trades if t.get("timestamp")]
+    if not timestamps:
+        return 9999
+    now = int(datetime.utcnow().timestamp())
+    return max(0, (now - max(timestamps)) // 86400)
+
+
 def unique_markets(trades: list[dict]) -> int:
     slugs = set()
     for t in trades:
