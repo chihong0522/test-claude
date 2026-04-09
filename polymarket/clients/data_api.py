@@ -87,7 +87,7 @@ class DataAPIClient(BaseClient):
             "limit": limit,
             "offset": offset,
         }
-        data = await self.get("/leaderboard", params)
+        data = await self.get("/v1/leaderboard", params)
         if isinstance(data, list):
             return data
         if isinstance(data, dict):

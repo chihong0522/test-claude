@@ -83,27 +83,21 @@ def compute_roi(
 # ── Win Rate ─────────────────────────────────────────────────────────────────
 
 def compute_win_rate(closed_positions: list[dict]) -> float:
-    """Win rate = winning resolved positions / total resolved positions."""
-    resolved = [
-        p for p in closed_positions
-        if _is_resolved(p)
-    ]
-    if not resolved:
+    """Win rate = winning positions / total positions with nonzero P&L."""
+    if not closed_positions:
         return 0.0
-    wins = sum(1 for p in resolved if float(p.get("realizedPnl") or p.get("realized_pnl") or 0) > 0)
-    return wins / len(resolved)
-
-
-def _is_resolved(position: dict) -> bool:
-    """Check if a position's market has resolved (price is 0 or 1)."""
-    cur_price = position.get("curPrice") or position.get("cur_price")
-    if cur_price is None:
-        return True  # Closed positions from API are resolved
-    try:
-        p = float(cur_price)
-        return p <= 0.01 or p >= 0.99
-    except (ValueError, TypeError):
-        return True
+    wins = 0
+    losses = 0
+    for p in closed_positions:
+        pnl = float(p.get("realizedPnl") or p.get("realized_pnl") or 0)
+        if pnl > 0:
+            wins += 1
+        elif pnl < 0:
+            losses += 1
+    total = wins + losses
+    if total == 0:
+        return 0.0
+    return wins / total
 
 
 # ── Profit Factor ────────────────────────────────────────────────────────────
