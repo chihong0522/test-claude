@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Copy Trading Research</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        .tier-S { background: #00C853; color: white; }
+        .tier-A { background: #2196F3; color: white; }
+        .tier-B { background: #FFC107; color: black; }
+        .tier-C { background: #FF9800; color: white; }
+        .tier-F { background: #F44336; color: white; }
+        .tier-badge { padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.75rem; }
+        .nav-active { border-bottom: 2px solid #2196F3; color: #2196F3; }
+        .card { background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); padding: 1.5rem; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <!-- Navigation -->
+    <nav class="bg-white shadow-sm border-b">
+        <div class="max-w-7xl mx-auto px-4 flex items-center h-14">
+            <h1 class="text-lg font-bold text-gray-800 mr-8">Polymarket Research</h1>
+            <div class="flex space-x-6 text-sm">
+                <a href="#/" class="nav-link py-4 text-gray-600 hover:text-blue-600" data-page="dashboard">Dashboard</a>
+                <a href="#/traders" class="nav-link py-4 text-gray-600 hover:text-blue-600" data-page="traders">Traders</a>
+                <a href="#/backtest" class="nav-link py-4 text-gray-600 hover:text-blue-600" data-page="backtest">Backtest</a>
+                <a href="#/reports" class="nav-link py-4 text-gray-600 hover:text-blue-600" data-page="reports">Reports</a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Content -->
+    <main id="app" class="max-w-7xl mx-auto px-4 py-6"></main>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
