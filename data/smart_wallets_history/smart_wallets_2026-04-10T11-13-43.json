@@ -1,0 +1,416 @@
+{
+  "refreshed_at": "2026-04-10T11:13:43.168359Z",
+  "source_markets_count": 576,
+  "source_window_days": 2,
+  "total_trades_analyzed": 1351533,
+  "total_unique_wallets": 27432,
+  "selection_metadata": {
+    "min_trades_threshold": 30,
+    "min_markets_threshold": 20,
+    "min_pnl": 0,
+    "freshness_required_hours": 72.0,
+    "top_n": 50
+  },
+  "wallets": [
+    {
+      "wallet": "0x5fe14b52584c83c18496914db0b30a28d4510981",
+      "pnl": 27520.29,
+      "trade_count": 336,
+      "unique_markets": 56,
+      "last_trade_ts": 1775816549,
+      "hours_since_last_trade": 0.9
+    },
+    {
+      "wallet": "0xeebde7a0e019a63e6b476eb425505b7b3e6eba30",
+      "pnl": 24650.02,
+      "trade_count": 17056,
+      "unique_markets": 412,
+      "last_trade_ts": 1775818957,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0x476639d9845d7a0261cb005dae6473f089ff5a03",
+      "pnl": 22714.76,
+      "trade_count": 15804,
+      "unique_markets": 445,
+      "last_trade_ts": 1775818895,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0xc5ae17997c95b7fc4aa8aca84e782ad59edd1144",
+      "pnl": 12011.74,
+      "trade_count": 114,
+      "unique_markets": 29,
+      "last_trade_ts": 1775806595,
+      "hours_since_last_trade": 3.6
+    },
+    {
+      "wallet": "0x04283f2fef49d70d8c55ab240450d17a65bf85b1",
+      "pnl": 10220.07,
+      "trade_count": 8444,
+      "unique_markets": 440,
+      "last_trade_ts": 1775818953,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0xe1d6b51521bd4365769199f392f9818661bd907c",
+      "pnl": 8138.45,
+      "trade_count": 3679,
+      "unique_markets": 178,
+      "last_trade_ts": 1775816481,
+      "hours_since_last_trade": 0.9
+    },
+    {
+      "wallet": "0xcfb4e61a8cbbf9101d84264a909d615cbb08c335",
+      "pnl": 7794.45,
+      "trade_count": 56,
+      "unique_markets": 25,
+      "last_trade_ts": 1775807881,
+      "hours_since_last_trade": 3.3
+    },
+    {
+      "wallet": "0x3a847382ad6fff9be1db4e073fd9b869f6884d44",
+      "pnl": 7600.28,
+      "trade_count": 4383,
+      "unique_markets": 174,
+      "last_trade_ts": 1775816043,
+      "hours_since_last_trade": 1.0
+    },
+    {
+      "wallet": "0x10c95474a829d67b6a41025da3b886f05719e999",
+      "pnl": 5821.85,
+      "trade_count": 1409,
+      "unique_markets": 129,
+      "last_trade_ts": 1775816551,
+      "hours_since_last_trade": 0.9
+    },
+    {
+      "wallet": "0x7f9ba35ac1e36e3e12132359eb7f0b75e72ef652",
+      "pnl": 5617.41,
+      "trade_count": 340,
+      "unique_markets": 92,
+      "last_trade_ts": 1775809183,
+      "hours_since_last_trade": 2.9
+    },
+    {
+      "wallet": "0x5bc331ff6a2f3a679f0c98cca0d92cdda5c47a59",
+      "pnl": 5372.29,
+      "trade_count": 195,
+      "unique_markets": 39,
+      "last_trade_ts": 1775804291,
+      "hours_since_last_trade": 4.3
+    },
+    {
+      "wallet": "0xe0229e10a858860218b6132f4234602c47bd6603",
+      "pnl": 5075.02,
+      "trade_count": 9861,
+      "unique_markets": 440,
+      "last_trade_ts": 1775818889,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0xf01f45835a90393a043bc08784dcdd15ffdac58a",
+      "pnl": 4308.34,
+      "trade_count": 95,
+      "unique_markets": 93,
+      "last_trade_ts": 1775818801,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0xb27bc932bf8110d8f78e55da7d5f0497a18b5b82",
+      "pnl": 3950.1,
+      "trade_count": 699,
+      "unique_markets": 152,
+      "last_trade_ts": 1775815487,
+      "hours_since_last_trade": 1.1
+    },
+    {
+      "wallet": "0x45e4dff0c2eccd0197d9c28a8b117472f9f4306f",
+      "pnl": 3937.81,
+      "trade_count": 138,
+      "unique_markets": 65,
+      "last_trade_ts": 1775808857,
+      "hours_since_last_trade": 3.0
+    },
+    {
+      "wallet": "0x7347d3291b321d2ee8d43d24aff244e7fb8c3d35",
+      "pnl": 3826.07,
+      "trade_count": 3832,
+      "unique_markets": 439,
+      "last_trade_ts": 1775818951,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0x20d2309cd92b797ae7ca175ed828ed8a27fbe29d",
+      "pnl": 3738.89,
+      "trade_count": 3466,
+      "unique_markets": 421,
+      "last_trade_ts": 1775818879,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0x989ef50496264021564d246b4b5e8f1c4484f503",
+      "pnl": 3715.89,
+      "trade_count": 654,
+      "unique_markets": 29,
+      "last_trade_ts": 1775818923,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0x295bd19a815180f42a04964929b9a77c328adc60",
+      "pnl": 3669.32,
+      "trade_count": 4137,
+      "unique_markets": 402,
+      "last_trade_ts": 1775818951,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0x9902cc1ffb582e079c902380b655fdc3afb534b3",
+      "pnl": 3571.09,
+      "trade_count": 1557,
+      "unique_markets": 41,
+      "last_trade_ts": 1775812619,
+      "hours_since_last_trade": 1.9
+    },
+    {
+      "wallet": "0x3cea98109dfd5a8ad40e9a8488433289c72eb12d",
+      "pnl": 3544.63,
+      "trade_count": 94,
+      "unique_markets": 55,
+      "last_trade_ts": 1775818997,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0x7cd2f2e87395e8be53a7a006caf09baad9603079",
+      "pnl": 3353.41,
+      "trade_count": 8026,
+      "unique_markets": 293,
+      "last_trade_ts": 1775815497,
+      "hours_since_last_trade": 1.1
+    },
+    {
+      "wallet": "0xcfb103c37c0234f524c632d964ed31f117b5f694",
+      "pnl": 3264.38,
+      "trade_count": 3774,
+      "unique_markets": 338,
+      "last_trade_ts": 1775818899,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0x674887d1ac838099a48b629dff53f25b7b87ee08",
+      "pnl": 2938.73,
+      "trade_count": 7394,
+      "unique_markets": 428,
+      "last_trade_ts": 1775818949,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0xe8ade1c67a880380ec861c476052c2f00057a859",
+      "pnl": 2906.63,
+      "trade_count": 61,
+      "unique_markets": 34,
+      "last_trade_ts": 1775676917,
+      "hours_since_last_trade": 39.6
+    },
+    {
+      "wallet": "0xa6a5d178b17d677e08bbe5f76713e42647b18700",
+      "pnl": 2895.23,
+      "trade_count": 53,
+      "unique_markets": 33,
+      "last_trade_ts": 1775816443,
+      "hours_since_last_trade": 0.9
+    },
+    {
+      "wallet": "0xd22c92099b4947ac70d8cb47e5c77ffc9f27efdf",
+      "pnl": 2817.94,
+      "trade_count": 7671,
+      "unique_markets": 239,
+      "last_trade_ts": 1775794195,
+      "hours_since_last_trade": 7.1
+    },
+    {
+      "wallet": "0xd5c1924a1b6b788e97483e6beacbfc48e905c524",
+      "pnl": 2801.96,
+      "trade_count": 133,
+      "unique_markets": 43,
+      "last_trade_ts": 1775808903,
+      "hours_since_last_trade": 3.0
+    },
+    {
+      "wallet": "0xc3547a4097807bc6482a1c033e71c1f7df087845",
+      "pnl": 2685.63,
+      "trade_count": 1195,
+      "unique_markets": 330,
+      "last_trade_ts": 1775818949,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0x0ba2026bcba099b8b03c9369366589b785e1a275",
+      "pnl": 2640.42,
+      "trade_count": 1315,
+      "unique_markets": 49,
+      "last_trade_ts": 1775809123,
+      "hours_since_last_trade": 2.9
+    },
+    {
+      "wallet": "0x02d7c85699f1d80b7a9680428d873fea8b1df14f",
+      "pnl": 2634.42,
+      "trade_count": 108,
+      "unique_markets": 50,
+      "last_trade_ts": 1775817383,
+      "hours_since_last_trade": 0.6
+    },
+    {
+      "wallet": "0x1e3b6822abfb39331b863eb729cdc251f607c850",
+      "pnl": 2478.11,
+      "trade_count": 402,
+      "unique_markets": 102,
+      "last_trade_ts": 1775816407,
+      "hours_since_last_trade": 0.9
+    },
+    {
+      "wallet": "0x1414960e5f6860744b284e7e2586cac8bfa5abce",
+      "pnl": 2320.19,
+      "trade_count": 608,
+      "unique_markets": 144,
+      "last_trade_ts": 1775817913,
+      "hours_since_last_trade": 0.5
+    },
+    {
+      "wallet": "0x92b6f377741a88378d0e5d4ca009230dcba8347c",
+      "pnl": 2202.75,
+      "trade_count": 5128,
+      "unique_markets": 404,
+      "last_trade_ts": 1775818951,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0xd189664c5308903476f9f079820431e4fd7d06f4",
+      "pnl": 2184.41,
+      "trade_count": 62,
+      "unique_markets": 48,
+      "last_trade_ts": 1775811857,
+      "hours_since_last_trade": 2.2
+    },
+    {
+      "wallet": "0x1c1172e5cf08c75df2840f0ee160817dde97778f",
+      "pnl": 2151.28,
+      "trade_count": 293,
+      "unique_markets": 185,
+      "last_trade_ts": 1775818327,
+      "hours_since_last_trade": 0.4
+    },
+    {
+      "wallet": "0x44116b11989f94c5f097bc4a985e34de210c715d",
+      "pnl": 2142.32,
+      "trade_count": 8610,
+      "unique_markets": 267,
+      "last_trade_ts": 1775814383,
+      "hours_since_last_trade": 1.5
+    },
+    {
+      "wallet": "0xf22f6ba87a4f8c20fc696c4b07898c659dabd06e",
+      "pnl": 2103.15,
+      "trade_count": 58,
+      "unique_markets": 58,
+      "last_trade_ts": 1775818951,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0x88744bf79812c27796f1e4928055367712570a5c",
+      "pnl": 2066.03,
+      "trade_count": 125,
+      "unique_markets": 53,
+      "last_trade_ts": 1775769565,
+      "hours_since_last_trade": 13.9
+    },
+    {
+      "wallet": "0x1fc82e096da1f53ee32ed407c264fb76ae2305cf",
+      "pnl": 1996.45,
+      "trade_count": 4685,
+      "unique_markets": 133,
+      "last_trade_ts": 1775816569,
+      "hours_since_last_trade": 0.8
+    },
+    {
+      "wallet": "0x60210781b8c4fd6da6a21b01298afd4bf0bf8ca2",
+      "pnl": 1915.87,
+      "trade_count": 204,
+      "unique_markets": 102,
+      "last_trade_ts": 1775818935,
+      "hours_since_last_trade": 0.2
+    },
+    {
+      "wallet": "0x45638567e27fc19261347b2681b4640e2610156a",
+      "pnl": 1863.27,
+      "trade_count": 750,
+      "unique_markets": 53,
+      "last_trade_ts": 1775800257,
+      "hours_since_last_trade": 5.4
+    },
+    {
+      "wallet": "0xfeaf34f86c4b1a7dab925fb61f5791c8cd1320ed",
+      "pnl": 1824.68,
+      "trade_count": 178,
+      "unique_markets": 96,
+      "last_trade_ts": 1775773577,
+      "hours_since_last_trade": 12.8
+    },
+    {
+      "wallet": "0xdf0d2ccfe3d7c2ef120395534e43afe283509f79",
+      "pnl": 1815.17,
+      "trade_count": 121,
+      "unique_markets": 111,
+      "last_trade_ts": 1775817899,
+      "hours_since_last_trade": 0.5
+    },
+    {
+      "wallet": "0x46e7c5b2e850195624c909d3443197bc14492f52",
+      "pnl": 1800.58,
+      "trade_count": 45,
+      "unique_markets": 25,
+      "last_trade_ts": 1775768025,
+      "hours_since_last_trade": 14.3
+    },
+    {
+      "wallet": "0x0216e2143201f87afd1faddea75ef23187e32baa",
+      "pnl": 1791.48,
+      "trade_count": 204,
+      "unique_markets": 101,
+      "last_trade_ts": 1775813597,
+      "hours_since_last_trade": 1.7
+    },
+    {
+      "wallet": "0xdeca32428d5cf4b1c4d7266a950e20791676ddd5",
+      "pnl": 1746.25,
+      "trade_count": 194,
+      "unique_markets": 127,
+      "last_trade_ts": 1775818187,
+      "hours_since_last_trade": 0.4
+    },
+    {
+      "wallet": "0x45bc74efa620b45c02308acaecdff1f7c06f978b",
+      "pnl": 1737.08,
+      "trade_count": 151,
+      "unique_markets": 70,
+      "last_trade_ts": 1775796559,
+      "hours_since_last_trade": 6.4
+    },
+    {
+      "wallet": "0x75110b2afa07a881292528a355715a0febe1582e",
+      "pnl": 1710.9,
+      "trade_count": 859,
+      "unique_markets": 154,
+      "last_trade_ts": 1775817577,
+      "hours_since_last_trade": 0.6
+    },
+    {
+      "wallet": "0x8de37f9bb738efdc1c932e276a87935f8ad326fd",
+      "pnl": 1706.49,
+      "trade_count": 261,
+      "unique_markets": 93,
+      "last_trade_ts": 1775818903,
+      "hours_since_last_trade": 0.2
+    }
+  ]
+}

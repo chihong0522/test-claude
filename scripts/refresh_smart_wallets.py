@@ -234,6 +234,11 @@ async def main():
         print(f"  Train:    {len(train_markets)} markets  ({_fmt(train_markets)})")
         print(f"  Validate: {len(validate_markets)} markets  ({_fmt(validate_markets)})")
 
+        # Per-wallet stats across the FULL window (for freshness + sample filters).
+        # We keep a separate train-only stats dict for the bootstrap ranking so
+        # the train/validate split is preserved.
+        all_stats = compute_raw_pnl(markets, trades_by_market)
+
         # Bootstrap candidate pool by raw PnL on TRAIN
         print(f"\n[4/6] Bootstrap candidate pool from train PnL...")
         train_stats = compute_raw_pnl(train_markets, trades_by_market)
@@ -302,12 +307,15 @@ async def main():
         )
         print(f"  Survivors after OOS filter: {len(survivors)}")
 
-        # Freshness + sample-size filters on the survivors
+        # Freshness + sample-size filters on the survivors.
+        # Use ALL-window stats (not just train) so freshness is measured
+        # against the most recent trading activity, not the train-period
+        # cutoff (which can be days old and cause the pool to empty).
         now = int(time.time())
         freshness_cutoff = now - int(args.freshness_hours * 3600)
         final: list[WalletSignalMetrics] = []
         for c in survivors:
-            raw = train_stats.get(c.wallet, {})
+            raw = all_stats.get(c.wallet, {})
             if raw.get("trades", 0) < args.min_trades:
                 continue
             if raw.get("unique_markets", 0) < args.min_markets:
@@ -348,7 +356,7 @@ async def main():
             "wallets": [],
         }
         for c in final:
-            raw = train_stats.get(c.wallet, {})
+            raw = all_stats.get(c.wallet, {})
             output["wallets"].append(
                 {
                     "wallet": c.wallet,
