@@ -298,7 +298,17 @@ async def paper_trade_one_market(
 
         t0 = time.time()
         try:
-            batch = await data_api.get_trades(market=condition_id, limit=500)
+            # Paginate up to 5 pages = 2500 trades per poll for richer history
+            batch = []
+            for page in range(5):
+                page_trades = await data_api.get_trades(
+                    market=condition_id, limit=500, offset=page * 500
+                )
+                if not page_trades:
+                    break
+                batch.extend(page_trades)
+                if len(page_trades) < 500:
+                    break
         except Exception as e:
             print(f"    poll error: {e}")
             await asyncio.sleep(POLL_INTERVAL_SEC)
