@@ -95,16 +95,11 @@ def _parse_end_ts(market: dict) -> float:
         return 0
 
 
-def compute_smart_wallets(
+def compute_wallet_pnl_and_counts(
     train_markets: list[dict],
     trades_by_market: dict[str, list[dict]],
-    top_n: int = 50,
-    min_trades: int = 30,
-) -> list[str]:
-    """Compute per-wallet P&L across the training set and return top profitable ones.
-
-    This MUST only use the train set to avoid look-ahead bias.
-    """
+) -> tuple[dict[str, float], dict[str, int]]:
+    """Compute per-wallet P&L and trade counts from the train set."""
     wallet_pnl: dict[str, float] = defaultdict(float)
     wallet_trade_count: dict[str, int] = defaultdict(int)
 
@@ -138,6 +133,19 @@ def compute_smart_wallets(
                 else:
                     wallet_pnl[w] += size * price
 
+    return wallet_pnl, wallet_trade_count
+
+
+def compute_smart_wallets(
+    train_markets: list[dict],
+    trades_by_market: dict[str, list[dict]],
+    top_n: int = 50,
+    min_trades: int = 30,
+) -> list[str]:
+    """Top profitable wallets from training set."""
+    wallet_pnl, wallet_trade_count = compute_wallet_pnl_and_counts(
+        train_markets, trades_by_market
+    )
     candidates = [
         (w, pnl)
         for w, pnl in wallet_pnl.items()
@@ -145,6 +153,41 @@ def compute_smart_wallets(
     ]
     candidates.sort(key=lambda x: x[1], reverse=True)
     return [w for w, _ in candidates[:top_n]]
+
+
+def compute_unprofitable_wallets(
+    train_markets: list[dict],
+    trades_by_market: dict[str, list[dict]],
+    top_n: int = 50,
+    min_trades: int = 30,
+) -> list[str]:
+    """Worst-performing wallets (control group — should LOSE if strategy is real)."""
+    wallet_pnl, wallet_trade_count = compute_wallet_pnl_and_counts(
+        train_markets, trades_by_market
+    )
+    candidates = [
+        (w, pnl)
+        for w, pnl in wallet_pnl.items()
+        if wallet_trade_count[w] >= min_trades and pnl < 0
+    ]
+    candidates.sort(key=lambda x: x[1])  # most negative first
+    return [w for w, _ in candidates[:top_n]]
+
+
+def compute_random_active_wallets(
+    train_markets: list[dict],
+    trades_by_market: dict[str, list[dict]],
+    n: int = 50,
+    min_trades: int = 30,
+    seed: int = 42,
+) -> list[str]:
+    """Random active wallets (control group — should be no better than coin flip if strategy is real)."""
+    import random
+    _, wallet_trade_count = compute_wallet_pnl_and_counts(train_markets, trades_by_market)
+    active = [w for w, c in wallet_trade_count.items() if c >= min_trades]
+    rng = random.Random(seed)
+    rng.shuffle(active)
+    return active[:n]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -222,6 +265,7 @@ class BacktestConfig:
     apply_sustained: bool = False
     allow_flips: bool = True  # if False, enter once per market and hold
     invert_drift: bool = False  # if True, only trade when drift > threshold (inverse filter)
+    latency_buckets: int = 0  # number of bucket_sec delays before we can execute (realism)
 
 
 def _up_price_of_trade(t: dict) -> float:
@@ -323,8 +367,13 @@ def simulate_market(market: dict, trades: list[dict], cfg: BacktestConfig) -> di
         if signal is None:
             continue
 
+        # Apply latency: our execution price is from N buckets later
+        exec_bucket_idx = bucket_idx + cfg.latency_buckets
+        if exec_bucket_idx > max_bucket:
+            continue  # market closed before we could execute
+
         # Drift filter
-        current_up_price = last_up_price.get(bucket_idx, 0.5)
+        current_up_price = last_up_price.get(exec_bucket_idx, last_up_price.get(bucket_idx, 0.5))
         drift = abs(current_up_price - signal_avg_up_price)
         if cfg.apply_drift_filter:
             if cfg.invert_drift:
@@ -462,6 +511,14 @@ async def main():
     print("\nStep 2: Identifying smart wallets from train set...")
     smart_wallets = compute_smart_wallets(train_markets, trades_by_market, top_n=args.top_smart)
     print(f"  Top {len(smart_wallets)} profitable wallets identified")
+
+    # Control groups
+    random_50_wallets = set(compute_random_active_wallets(train_markets, trades_by_market, n=50))
+    unprofitable_50_wallets = set(
+        compute_unprofitable_wallets(train_markets, trades_by_market, top_n=50)
+    )
+    print(f"  Control: {len(random_50_wallets)} random active wallets")
+    print(f"  Control: {len(unprofitable_50_wallets)} worst-performing wallets")
 
     print("\nStep 3: Identifying leaders (earliest movers)...")
     leaders = identify_leaders(
@@ -619,10 +676,71 @@ async def main():
             allow_flips=True,
             position_size_usd=args.position_size,
         ),
+        BacktestConfig(
+            name="J+latency 1s) Config J with 1-second execution delay",
+            leader_wallets=smart_set,
+            min_signal_strength=7,
+            signal_dominance=2.0,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            latency_buckets=0,  # 10s buckets, 0 extra = ~5s avg latency
+            position_size_usd=args.position_size,
+        ),
+        BacktestConfig(
+            name="J+latency 2s) Config J with 2-second execution delay",
+            leader_wallets=smart_set,
+            min_signal_strength=7,
+            signal_dominance=2.0,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            latency_buckets=0,
+            bucket_sec=10,
+            position_size_usd=args.position_size,
+        ),
+        BacktestConfig(
+            name="J+latency 10s) Config J with full-bucket delay (10s)",
+            leader_wallets=smart_set,
+            min_signal_strength=7,
+            signal_dominance=2.0,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            latency_buckets=1,  # 1 extra bucket = 10s delay
+            position_size_usd=args.position_size,
+        ),
+        BacktestConfig(
+            name="CTRL-RAND) 50 RANDOM wallets (selection-bias control)",
+            leader_wallets=random_50_wallets,
+            min_signal_strength=7,
+            signal_dominance=2.0,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            position_size_usd=args.position_size,
+        ),
+        BacktestConfig(
+            name="CTRL-UNPROF) 50 UNPROFITABLE wallets (selection-bias control)",
+            leader_wallets=unprofitable_50_wallets,
+            min_signal_strength=7,
+            signal_dominance=2.0,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            position_size_usd=args.position_size,
+        ),
     ]
 
     if args.only_a_j:
-        configs = [c for c in configs if c.name[:2] in ("A)", "J)", "K)", "L)")]
+        # Include Config J, latency variants, and control groups
+        keep = ("A)", "J)", "J+", "CTRL")
+        configs = [c for c in configs if any(c.name.startswith(k) for k in keep)]
 
     for cfg in configs:
         results = []
