@@ -11,3 +11,6 @@ build/
 .pytest_cache/
 state.json
 **/__pycache__/
+
+# Live paper trading logs (in-flight bot output, summarized manually after runs)
+data/live_paper/
