@@ -36,32 +36,45 @@ async def main():
         print("=" * 80)
         print(f"\n[{datetime.utcnow().strftime('%H:%M:%S')}] Step 1: Fetching leaderboard...")
 
-        # Fetch top traders by all-time P&L
-        leaderboard = await data_client.get_leaderboard(
-            category="OVERALL", time_period="ALL", order_by="PNL", limit=50
-        )
-        print(f"  Found {len(leaderboard)} traders on all-time leaderboard")
+        # Broad discovery across categories + time periods
+        categories = ["OVERALL", "POLITICS", "SPORTS", "CRYPTO", "CULTURE",
+                      "WEATHER", "ECONOMICS", "TECH", "FINANCE"]
+        time_periods = ["ALL", "MONTH", "WEEK"]
 
-        # Also fetch monthly top traders
-        monthly = await data_client.get_leaderboard(
-            category="OVERALL", time_period="MONTH", order_by="PNL", limit=50
-        )
-        print(f"  Found {len(monthly)} traders on monthly leaderboard")
-
-        # Merge unique wallets
         wallets = {}
-        for entry in leaderboard + monthly:
-            w = entry.get("proxyWallet")
-            if w and w not in wallets:
-                wallets[w] = {
-                    "wallet": w,
-                    "name": entry.get("userName") or entry.get("pseudonym") or w[:10],
-                    "pnl": float(entry.get("pnl", 0)),
-                    "volume": float(entry.get("vol", 0)),
-                    "profile_image": entry.get("profileImage"),
-                }
+        total_fetched = 0
 
-        print(f"  {len(wallets)} unique wallets to analyze")
+        for category in categories:
+            for period in time_periods:
+                try:
+                    # Paginate up to 150 entries per (category, period)
+                    for offset in [0, 50, 100]:
+                        entries = await data_client.get_leaderboard(
+                            category=category, time_period=period,
+                            order_by="PNL", limit=50, offset=offset,
+                        )
+                        if not entries:
+                            break
+                        total_fetched += len(entries)
+                        for entry in entries:
+                            w = entry.get("proxyWallet")
+                            if w and w not in wallets:
+                                wallets[w] = {
+                                    "wallet": w,
+                                    "name": entry.get("userName") or entry.get("pseudonym") or w[:10],
+                                    "pnl": float(entry.get("pnl", 0)),
+                                    "volume": float(entry.get("vol", 0)),
+                                    "profile_image": entry.get("profileImage"),
+                                    "discovered_in": f"{category}/{period}",
+                                }
+                        if len(entries) < 50:
+                            break  # last page
+                    print(f"  {category:10s} {period:5s}  wallets so far: {len(wallets)}")
+                except Exception as e:
+                    logger.debug("Skip %s/%s: %s", category, period, e)
+
+        print(f"\n  Total leaderboard entries fetched: {total_fetched}")
+        print(f"  Unique wallets discovered: {len(wallets)}")
 
         # ══════════════════════════════════════════════════════════════════
         # Step 2: Fetch trades + positions for each trader
@@ -70,13 +83,13 @@ async def main():
 
         scored_traders = []
         total = len(wallets)
-        sem = asyncio.Semaphore(3)  # 3 concurrent fetches
+        sem = asyncio.Semaphore(8)  # 8 concurrent fetches
 
         async def analyze_trader(idx, wallet, info):
             async with sem:
                 try:
-                    # Fetch trades (up to 50 pages = 5000 trades)
-                    trades = await data_client.get_all_trades(wallet, max_pages=50)
+                    # Fetch trades (up to 30 pages = 3000 trades)
+                    trades = await data_client.get_all_trades(wallet, max_pages=30)
                     if len(trades) < 30:
                         return None
 
