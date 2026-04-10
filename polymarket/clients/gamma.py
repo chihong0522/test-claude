@@ -61,6 +61,25 @@ class GammaClient(BaseClient):
         """Fetch all markets with pagination."""
         return await self.get_paginated("/markets", {"active": "true"}, max_pages=max_pages)
 
+    async def get_events_by_ticker(
+        self,
+        ticker: str,
+        limit: int = 100,
+        offset: int = 0,
+        order: str = "startDate",
+        ascending: bool = False,
+    ) -> list[dict]:
+        """Fetch events filtered by ticker (e.g. 'btc-updown-5m')."""
+        params: dict[str, Any] = {
+            "ticker": ticker,
+            "limit": limit,
+            "offset": offset,
+            "order": order,
+            "ascending": str(ascending).lower(),
+        }
+        data = await self.get("/events", params)
+        return data if isinstance(data, list) else []
+
     async def get_market_liquidity(self, condition_id: str) -> float | None:
         """Get liquidity for a specific market."""
         market = await self.get_market_by_condition(condition_id)
