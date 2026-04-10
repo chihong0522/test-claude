@@ -35,6 +35,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from polymarket.analyzer.wallet_signal_accuracy import (
+    apply_blacklist_filters,
+    compute_wallet_signal_metrics,
+    rank_wallets,
+    validate_oos,
+)
 from polymarket.clients.data_api import DataAPIClient
 from polymarket.clients.gamma import GammaClient
 from polymarket.collector.btc_5min_discovery import (
@@ -266,6 +272,10 @@ class BacktestConfig:
     allow_flips: bool = True  # if False, enter once per market and hold
     invert_drift: bool = False  # if True, only trade when drift > threshold (inverse filter)
     latency_buckets: int = 0  # number of bucket_sec delays before we can execute (realism)
+    # Config N: count distinct wallets (not raw votes) — kills "3 bots firing 7 trades"
+    count_distinct_wallets: bool = False
+    # Config N: time gate — reject signals with < N seconds remaining in window
+    min_seconds_remaining: int = 0
 
 
 def _up_price_of_trade(t: dict) -> float:
@@ -319,6 +329,9 @@ def simulate_market(market: dict, trades: list[dict], cfg: BacktestConfig) -> di
             offset_sec < cfg.window_start_sec or offset_sec > cfg.window_end_sec
         ):
             continue
+        # Time gate: reject late-window buckets (Config N)
+        if cfg.min_seconds_remaining > 0 and (300 - offset_sec) < cfg.min_seconds_remaining:
+            continue
 
         bucket = buckets[bucket_idx]
         leader_trades = [t for t in bucket if t.get("proxyWallet") in cfg.leader_wallets]
@@ -327,19 +340,27 @@ def simulate_market(market: dict, trades: list[dict], cfg: BacktestConfig) -> di
         no_votes = [t for t in leader_trades if (t.get("side") or "BUY").upper() == "BUY"
                     and (t.get("outcomeIndex") or 0) == 1]
 
+        # Config N: count distinct wallets instead of raw trade rows
+        if cfg.count_distinct_wallets:
+            yes_strength = len({t.get("proxyWallet") for t in yes_votes if t.get("proxyWallet")})
+            no_strength = len({t.get("proxyWallet") for t in no_votes if t.get("proxyWallet")})
+        else:
+            yes_strength = len(yes_votes)
+            no_strength = len(no_votes)
+
         signal: str | None = None
         signal_avg_up_price: float = 0.5
         if (
-            len(yes_votes) >= cfg.min_signal_strength
-            and len(yes_votes) >= cfg.signal_dominance * max(len(no_votes), 1)
+            yes_strength >= cfg.min_signal_strength
+            and yes_strength >= cfg.signal_dominance * max(no_strength, 1)
         ):
             signal = "YES"
             signal_avg_up_price = statistics.mean(
                 [float(t.get("price") or 0.5) for t in yes_votes]
             )
         elif (
-            len(no_votes) >= cfg.min_signal_strength
-            and len(no_votes) >= cfg.signal_dominance * max(len(yes_votes), 1)
+            no_strength >= cfg.min_signal_strength
+            and no_strength >= cfg.signal_dominance * max(yes_strength, 1)
         ):
             signal = "NO"
             # convert to implied UP price for drift comparison
@@ -510,7 +531,7 @@ async def main():
 
     print("\nStep 2: Identifying smart wallets from train set...")
     smart_wallets = compute_smart_wallets(train_markets, trades_by_market, top_n=args.top_smart)
-    print(f"  Top {len(smart_wallets)} profitable wallets identified")
+    print(f"  Top {len(smart_wallets)} profitable wallets identified (legacy PnL-only)")
 
     # Control groups
     random_50_wallets = set(compute_random_active_wallets(train_markets, trades_by_market, n=50))
@@ -519,6 +540,58 @@ async def main():
     )
     print(f"  Control: {len(random_50_wallets)} random active wallets")
     print(f"  Control: {len(unprofitable_50_wallets)} worst-performing wallets")
+
+    # Config N: signal-time-accuracy-filtered wallet pool
+    print("\nStep 2b: Building Config N pool (signal-time accuracy + OOS validation)...")
+    bootstrap_pool = set(
+        compute_smart_wallets(train_markets, trades_by_market, top_n=150)
+    )
+    print(f"  Bootstrap candidates: {len(bootstrap_pool)}")
+    n_train_metrics = compute_wallet_signal_metrics(
+        train_markets,
+        trades_by_market,
+        candidate_wallets=bootstrap_pool,
+        min_distinct_wallets=7,
+        signal_dominance=2.0,
+        bucket_sec=10,
+        min_seconds_remaining=180,
+    )
+    n_dropped = apply_blacklist_filters(
+        n_train_metrics,
+        min_participations_for_accuracy_filter=100,
+        max_bad_accuracy=0.50,
+    )
+    n_mm = sum(1 for _, r in n_dropped if r.startswith("market_maker"))
+    n_bad = sum(1 for _, r in n_dropped if r.startswith("bad_signal"))
+    print(f"  Removed: {n_mm} market makers, {n_bad} bad-accuracy wallets")
+    n_ranked = rank_wallets(
+        n_train_metrics,
+        min_participations=30,
+        min_accuracy=0.52,
+        max_p_value=None,
+    )
+    print(f"  Train-filtered pool: {len(n_ranked)} wallets")
+    n_survivors = validate_oos(
+        n_ranked,
+        test_markets,
+        trades_by_market,
+        min_distinct_wallets=7,
+        signal_dominance=2.0,
+        bucket_sec=10,
+        min_seconds_remaining=180,
+        min_oos_accuracy=0.52,
+        min_oos_participations=5,
+    )
+    print(f"  After OOS validation: {len(n_survivors)} wallets")
+    n_pool = {w.wallet for w in n_survivors[:50]}
+    if n_survivors[:10]:
+        print("  Top 10 by train signal-time accuracy:")
+        for i, w in enumerate(n_survivors[:10], 1):
+            print(
+                f"    {i:>2}. {w.wallet[:12]}..  "
+                f"train={w.signal_time_accuracy*100:>5.1f}% ({w.signal_wins}/{w.signal_participations})  "
+                f"oos={w.oos_accuracy*100:>5.1f}% ({w.oos_wins}/{w.oos_participations})"
+            )
 
     print("\nStep 3: Identifying leaders (earliest movers)...")
     leaders = identify_leaders(
@@ -735,11 +808,92 @@ async def main():
             allow_flips=True,
             position_size_usd=args.position_size,
         ),
+        BacktestConfig(
+            name="N) Quality pool + distinct wallets + time gate 180s",
+            leader_wallets=n_pool,
+            min_signal_strength=7,
+            signal_dominance=2.0,
+            count_distinct_wallets=True,
+            min_seconds_remaining=180,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            position_size_usd=args.position_size,
+        ),
+        BacktestConfig(
+            name="N-strict) Quality pool + distinct wallets + time gate 240s",
+            leader_wallets=n_pool,
+            min_signal_strength=7,
+            signal_dominance=2.0,
+            count_distinct_wallets=True,
+            min_seconds_remaining=240,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            position_size_usd=args.position_size,
+        ),
+        BacktestConfig(
+            name="N-nogate) Quality pool + distinct wallets, NO time gate (control)",
+            leader_wallets=n_pool,
+            min_signal_strength=7,
+            signal_dominance=2.0,
+            count_distinct_wallets=True,
+            min_seconds_remaining=0,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            position_size_usd=args.position_size,
+        ),
+        BacktestConfig(
+            name="N-loose) Quality pool + min 5 distinct wallets + time gate 180s",
+            leader_wallets=n_pool,
+            min_signal_strength=5,
+            signal_dominance=2.0,
+            count_distinct_wallets=True,
+            min_seconds_remaining=180,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            position_size_usd=args.position_size,
+        ),
+        BacktestConfig(
+            name="N-loose4) Quality pool + min 4 distinct wallets + time gate 180s",
+            leader_wallets=n_pool,
+            min_signal_strength=4,
+            signal_dominance=2.0,
+            count_distinct_wallets=True,
+            min_seconds_remaining=180,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            position_size_usd=args.position_size,
+        ),
+        BacktestConfig(
+            name="N-loose3) Quality pool + min 3 distinct wallets + time gate 180s",
+            leader_wallets=n_pool,
+            min_signal_strength=3,
+            signal_dominance=2.0,
+            count_distinct_wallets=True,
+            min_seconds_remaining=180,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            position_size_usd=args.position_size,
+        ),
     ]
 
     if args.only_a_j:
-        # Include Config J, latency variants, and control groups
-        keep = ("A)", "J)", "J+", "CTRL")
+        # Include Config J baseline, Config N variants, and control groups
+        keep = (
+            "A)", "J)", "J+", "CTRL",
+            "N)", "N-strict", "N-nogate", "N-loose", "N-loose4", "N-loose3",
+        )
         configs = [c for c in configs if any(c.name.startswith(k) for k in keep)]
 
     for cfg in configs:

@@ -63,8 +63,15 @@ def load_smart_wallets() -> set[str]:
     with open(SMART_WALLETS_FILE, "r") as f:
         data = json.load(f)
     refreshed = data.get("refreshed_at", "unknown")
+    version = data.get("version", 1)
     wallets = {w["wallet"] for w in data.get("wallets", [])}
-    print(f"Loaded {len(wallets)} smart wallets (refreshed {refreshed[:19]})")
+    print(f"Loaded {len(wallets)} smart wallets (v{version}, refreshed {refreshed[:19]})")
+    if version < 2:
+        print(
+            "  WARNING: wallet pool is v1 (legacy PnL-only selection). "
+            "Strongly recommend: python scripts/refresh_smart_wallets.py "
+            "to regenerate with signal-time accuracy + OOS validation."
+        )
     return wallets
 
 
@@ -97,9 +104,10 @@ class MarketTradingState:
     end_ts: int
     smart_wallets: set[str]
 
-    # Strategy params (Config J)
-    min_signal_strength: int = 7
+    # Strategy params (Config N — quality-first)
+    min_signal_strength: int = 7  # distinct wallets (not raw votes)
     signal_dominance: float = 2.0
+    min_seconds_remaining: int = 180  # time gate: only fire with >= 3 min left
     position_size_usd: float = 60.0
     fee_pct: float = 0.02
 
@@ -206,7 +214,13 @@ async def poll_http_trades(
 
 
 def process_voting(state: MarketTradingState, now_ts: int):
-    """Voting logic: process NEW buckets only, enter at CURRENT WS price."""
+    """Voting logic: process NEW buckets only, enter at CURRENT WS price.
+
+    Upgraded per Config N:
+      - Counts DISTINCT wallets, not raw votes (kills "3 bots firing 7 trades" loophole)
+      - Time gate: signals with < min_seconds_remaining in the window are rejected
+        (empirically, signals in the last 180s of a 5-min window are ~50% noise)
+    """
     buckets: dict[int, list[dict]] = defaultdict(list)
     for t in state.http_trades:
         ts = int(t.get("timestamp") or 0)
@@ -224,32 +238,42 @@ def process_voting(state: MarketTradingState, now_ts: int):
             break
         state.buckets_processed.add(bi)
 
+        # Time gate — reject late-window buckets (high-noise region)
+        bucket_start_ts = state.start_ts + bi * 10
+        seconds_remaining = state.end_ts - bucket_start_ts
+        if seconds_remaining < state.min_seconds_remaining:
+            continue
+
         bucket = buckets[bi]
         smart_trades = [
             t for t in bucket if t.get("proxyWallet") in state.smart_wallets
         ]
-        yes_votes = [
+        yes_trades = [
             t
             for t in smart_trades
             if (t.get("side") or "BUY").upper() == "BUY"
             and (t.get("outcomeIndex") or 0) == 0
         ]
-        no_votes = [
+        no_trades = [
             t
             for t in smart_trades
             if (t.get("side") or "BUY").upper() == "BUY"
             and (t.get("outcomeIndex") or 0) == 1
         ]
+        yes_wallets = {t.get("proxyWallet") for t in yes_trades if t.get("proxyWallet")}
+        no_wallets = {t.get("proxyWallet") for t in no_trades if t.get("proxyWallet")}
+        yes_count = len(yes_wallets)
+        no_count = len(no_wallets)
 
         signal = None
         if (
-            len(yes_votes) >= state.min_signal_strength
-            and len(yes_votes) >= state.signal_dominance * max(len(no_votes), 1)
+            yes_count >= state.min_signal_strength
+            and yes_count >= state.signal_dominance * max(no_count, 1)
         ):
             signal = "YES"
         elif (
-            len(no_votes) >= state.min_signal_strength
-            and len(no_votes) >= state.signal_dominance * max(len(yes_votes), 1)
+            no_count >= state.min_signal_strength
+            and no_count >= state.signal_dominance * max(yes_count, 1)
         ):
             signal = "NO"
 
@@ -272,8 +296,9 @@ def process_voting(state: MarketTradingState, now_ts: int):
                     "action": "ENTER",
                     "side": signal,
                     "price": round(our_entry_price, 4),
-                    "yes_votes": len(yes_votes),
-                    "no_votes": len(no_votes),
+                    "yes_wallets": yes_count,
+                    "no_wallets": no_count,
+                    "remaining_s": seconds_remaining,
                     "ts": now_ts,
                 }
             )
@@ -291,8 +316,9 @@ def process_voting(state: MarketTradingState, now_ts: int):
                     "action": "FLIP",
                     "side": signal,
                     "price": round(our_entry_price, 4),
-                    "yes_votes": len(yes_votes),
-                    "no_votes": len(no_votes),
+                    "yes_wallets": yes_count,
+                    "no_wallets": no_count,
+                    "remaining_s": seconds_remaining,
                     "ts": now_ts,
                 }
             )
@@ -372,6 +398,8 @@ async def trade_one_market(
     market_info: dict,
     smart_wallets: set[str],
     confusion_detector: ConfusionDetector,
+    min_signal_strength: int = 7,
+    min_seconds_remaining: int = 180,
 ) -> dict:
     """Trade one market with WebSocket-driven polling."""
     slug_ts = market_info["_slug_ts"]
@@ -391,6 +419,8 @@ async def trade_one_market(
         start_ts=slug_ts,
         end_ts=slug_ts + FIVE_MIN,
         smart_wallets=smart_wallets,
+        min_signal_strength=min_signal_strength,
+        min_seconds_remaining=min_seconds_remaining,
     )
 
     # Check confusion detector
@@ -501,7 +531,11 @@ async def trade_one_market(
 
     summary = summarize_market(state)
     for a in state.actions:
-        print(f"    b{a['bucket']:3d}: {a['action']:5s} {a['side']} @ {a['price']}  (votes {a.get('yes_votes',0)}Y/{a.get('no_votes',0)}N)")
+        print(
+            f"    b{a['bucket']:3d}: {a['action']:5s} {a['side']} @ {a['price']}  "
+            f"(wallets {a.get('yes_wallets', 0)}Y/{a.get('no_wallets', 0)}N, "
+            f"remaining {a.get('remaining_s', 0)}s)"
+        )
 
     # Record outcome for confusion detector
     had_signal = state.position is not None
@@ -544,13 +578,30 @@ async def trade_one_market(
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--duration-min", type=float, default=30)
+    parser.add_argument(
+        "--min-signal-strength",
+        type=int,
+        default=4,
+        help=(
+            "Minimum DISTINCT wallets (not raw votes) to fire a signal. "
+            "Default 4 is tuned for the 15-wallet v2 quality pool; with a "
+            "legacy 50-wallet pool use 7."
+        ),
+    )
+    parser.add_argument(
+        "--min-seconds-remaining",
+        type=int,
+        default=180,
+        help="Reject signals with < N seconds remaining in the 5-min window",
+    )
     args = parser.parse_args()
 
     print("=" * 90)
-    print("  LIVE TRADING BOT — WebSocket-First (low-latency variant)")
+    print("  LIVE TRADING BOT — WebSocket-First (Config N — quality-first)")
     print("=" * 90)
     print(f"  Duration:     {args.duration_min} minutes")
-    print(f"  Strategy:     Config J (7+ votes, flips on)")
+    print(f"  Min strength: {args.min_signal_strength} distinct wallets")
+    print(f"  Time gate:    >= {args.min_seconds_remaining}s remaining")
     print(f"  Mode:         PAPER (no real money)")
     print(f"  Polling:      {BASELINE_POLL_INTERVAL}s baseline + burst-triggered HTTP")
     print(f"  Burst thresh: {BURST_TRADE_THRESHOLD} trades in {BURST_LOOKBACK_SEC}s")
@@ -593,7 +644,14 @@ async def main():
             market_count += 1
             print(f"\n========== Market {market_count} ==========")
             result = await trade_one_market(
-                gamma, data_api, ws, market, smart_wallets, confusion
+                gamma,
+                data_api,
+                ws,
+                market,
+                smart_wallets,
+                confusion,
+                min_signal_strength=args.min_signal_strength,
+                min_seconds_remaining=args.min_seconds_remaining,
             )
             results.append(result)
 
