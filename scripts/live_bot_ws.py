@@ -594,12 +594,20 @@ async def main():
         default=180,
         help="Reject signals with < N seconds remaining in the 5-min window",
     )
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=0,
+        help="Stop after N markets traded (0 = unlimited, use --duration-min only)",
+    )
     args = parser.parse_args()
 
     print("=" * 90)
     print("  LIVE TRADING BOT — WebSocket-First (Config N — quality-first)")
     print("=" * 90)
     print(f"  Duration:     {args.duration_min} minutes")
+    if args.max_cycles > 0:
+        print(f"  Max cycles:   {args.max_cycles} markets")
     print(f"  Min strength: {args.min_signal_strength} distinct wallets")
     print(f"  Time gate:    >= {args.min_seconds_remaining}s remaining")
     print(f"  Mode:         PAPER (no real money)")
@@ -642,7 +650,7 @@ async def main():
                 continue
 
             market_count += 1
-            print(f"\n========== Market {market_count} ==========")
+            print(f"\n========== Market {market_count} ==========", flush=True)
             result = await trade_one_market(
                 gamma,
                 data_api,
@@ -654,6 +662,10 @@ async def main():
                 min_seconds_remaining=args.min_seconds_remaining,
             )
             results.append(result)
+
+            if args.max_cycles > 0 and market_count >= args.max_cycles:
+                print(f"\n  Reached max cycles ({args.max_cycles}) — exiting loop.", flush=True)
+                break
 
         # Retroactive resolution
         print("\n" + "=" * 90)
