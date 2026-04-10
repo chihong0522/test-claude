@@ -179,6 +179,22 @@ class MarketWebSocketClient:
                 pass
             self._ws = None
 
+    async def resubscribe(self, asset_ids: list[str]):
+        """Replace the current subscription with a new set of asset IDs.
+
+        This closes the existing connection (which flushes the old
+        subscription set on the server) and reconnects with only the new IDs.
+        Use this on market transitions to avoid accumulating stale subs.
+        """
+        self._subscribed_assets = set(asset_ids)
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+        # Next iteration of events() will reconnect with the new set
+
     async def events(self) -> AsyncIterator[WSEvent]:
         """Async iterator yielding normalized WSEvents.
 

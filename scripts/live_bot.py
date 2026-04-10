@@ -190,7 +190,17 @@ async def poll_http_trades(
 
 
 def process_voting(state: MarketTradingState, now_ts: int):
-    """Run Config J voting logic on current http_trades data."""
+    """Run Config J voting on NEW buckets only, using CURRENT market price.
+
+    Critical fix: only processes buckets that are NEW (not already seen).
+    Entry price always uses the most recent trade's up-price across ALL
+    trades (what we'd realistically fill at right now), not the historical
+    bucket's avg price.
+
+    This is the correct semantics for real-time operation: we see a bucket
+    once, decide based on its vote count, enter at the CURRENT price (not
+    the bucket's historical price), and never re-process it.
+    """
     buckets: dict[int, list[dict]] = defaultdict(list)
     for t in state.http_trades:
         ts = int(t.get("timestamp") or 0)
@@ -199,21 +209,26 @@ def process_voting(state: MarketTradingState, now_ts: int):
             bucket_idx = int(offset // 10)
             buckets[bucket_idx].append(t)
 
-    # Update running up-price
-    for bi in sorted(buckets.keys()):
-        for t in buckets[bi]:
-            state.ws_latest_price_up = up_price_from_trade(t)
+    # Update the "current market price" = most recent trade's up-price
+    # (from any bucket). This is what we'd pay if filling right now.
+    all_trades_sorted = sorted(
+        state.http_trades, key=lambda t: int(t.get("timestamp") or 0)
+    )
+    if all_trades_sorted:
+        state.ws_latest_price_up = up_price_from_trade(all_trades_sorted[-1])
 
     current_real_bucket = max(0, (now_ts - state.start_ts) // 10)
 
-    # Reset position for replay (simpler than incremental state)
-    state.position = None
-    state.realized_pnl = 0.0
-    actions_now: list[dict] = []
-
     for bi in sorted(buckets.keys()):
+        # Skip buckets already processed (avoid re-firing signals)
+        if bi in state.buckets_processed:
+            continue
+
+        # Skip future buckets (shouldn't happen but safety)
         if bi > current_real_bucket:
             break
+
+        state.buckets_processed.add(bi)
 
         bucket = buckets[bi]
         smart_trades = [
@@ -247,10 +262,9 @@ def process_voting(state: MarketTradingState, now_ts: int):
         if signal is None:
             continue
 
-        # Find latest price at end of this bucket
-        last_trade = max(bucket, key=lambda t: int(t.get("timestamp") or 0))
-        up_price = up_price_from_trade(last_trade)
-        our_entry_price = up_price if signal == "YES" else 1.0 - up_price
+        # Use CURRENT market price for entry, not historical bucket price
+        current_up = state.ws_latest_price_up
+        our_entry_price = current_up if signal == "YES" else 1.0 - current_up
         if our_entry_price < 0.05 or our_entry_price > 0.95:
             continue
 
@@ -258,46 +272,80 @@ def process_voting(state: MarketTradingState, now_ts: int):
             size = state.position_size_usd / our_entry_price
             cost = state.position_size_usd * (1 + state.fee_pct)
             state.position = (signal, our_entry_price, size, cost)
-            actions_now.append(
-                {"bucket": bi, "action": "ENTER", "side": signal, "price": round(our_entry_price, 4)}
+            state.actions.append(
+                {
+                    "bucket": bi,
+                    "action": "ENTER",
+                    "side": signal,
+                    "price": round(our_entry_price, 4),
+                    "yes_votes": len(yes_votes),
+                    "no_votes": len(no_votes),
+                }
             )
         elif state.position[0] != signal:
             old_side, old_entry, old_size, old_cost = state.position
-            old_current = up_price if old_side == "YES" else 1.0 - up_price
+            old_current = current_up if old_side == "YES" else 1.0 - current_up
             proceeds = old_size * old_current * (1 - state.fee_pct)
             state.realized_pnl += proceeds - old_cost
             new_size = state.position_size_usd / our_entry_price
             new_cost = state.position_size_usd * (1 + state.fee_pct)
             state.position = (signal, our_entry_price, new_size, new_cost)
-            actions_now.append(
-                {"bucket": bi, "action": "FLIP", "side": signal, "price": round(our_entry_price, 4)}
+            state.actions.append(
+                {
+                    "bucket": bi,
+                    "action": "FLIP",
+                    "side": signal,
+                    "price": round(our_entry_price, 4),
+                    "yes_votes": len(yes_votes),
+                    "no_votes": len(no_votes),
+                }
             )
-
-    state.actions = actions_now
 
 
 def summarize_market(state: MarketTradingState) -> dict:
-    """Compute final P&L given resolution and return summary dict."""
-    if state.winning_index is None or state.position is None:
-        return {
-            "slug": state.slug,
-            "pnl": state.realized_pnl if state.position is None else 0,
-            "actions": len(state.actions),
-            "resolution": "unknown" if state.winning_index is None else "no_signal",
-        }
+    """Compute final P&L given resolution and return summary dict.
+
+    Always returns the position state so retroactive resolution fetches can
+    recompute P&L once the market resolves.
+    """
+    result = {
+        "slug": state.slug,
+        "condition_id": state.condition_id,
+        "actions": len(state.actions),
+        "action_log": list(state.actions),
+        "realized_pnl_flips": round(state.realized_pnl, 2),
+    }
+
+    if state.position is None:
+        # No signal fired — flat
+        result.update({
+            "pnl": 0.0,
+            "position": None,
+            "winning_idx": state.winning_index,
+        })
+        return result
+
     side, entry, size, cost = state.position
     pos_idx = 0 if side == "YES" else 1
-    settlement = size if pos_idx == state.winning_index else 0.0
-    final = state.realized_pnl + (settlement - cost)
-    state.final_pnl = final
-    return {
-        "slug": state.slug,
-        "pnl": round(final, 2),
-        "actions": len(state.actions),
-        "winning_idx": state.winning_index,
+
+    result.update({
         "position": side,
         "entry_price": round(entry, 4),
-    }
+        "size": round(size, 2),
+        "cost_basis": round(cost, 2),
+    })
+
+    if state.winning_index is None:
+        # Resolution not yet known — P&L is unrealized (use realized flips for now)
+        result["pnl"] = round(state.realized_pnl, 2)
+        result["winning_idx"] = None
+    else:
+        settlement = size if pos_idx == state.winning_index else 0.0
+        final = state.realized_pnl + (settlement - cost)
+        result["pnl"] = round(final, 2)
+        result["winning_idx"] = state.winning_index
+
+    return result
 
 
 async def trade_one_market(
@@ -332,12 +380,12 @@ async def trade_one_market(
     print(f"  Window: {_fmt_ts(state.start_ts)} -> {_fmt_ts(state.end_ts)} UTC")
     print(f"  Confusion status: {confusion_detector.status()}")
 
-    # Subscribe to both tokens
+    # Resubscribe to only this market's tokens (flush old subs)
     if token_ids:
         try:
-            await ws.subscribe(token_ids)
+            await ws.resubscribe(token_ids)
         except Exception as e:
-            logger.warning(f"WS subscribe failed: {e}")
+            logger.warning(f"WS resubscribe failed: {e}")
 
     # Main trading loop
     btc_prices: deque[float] = deque(maxlen=20)
@@ -382,19 +430,12 @@ async def trade_one_market(
 
         await asyncio.sleep(0.5)
 
-    # Market closed — try to fetch resolution (retry a few times)
-    print("  Market closed, fetching resolution...")
-    for retry in range(3):
-        await asyncio.sleep(5)  # UMA takes a moment
-        try:
-            data = await gamma.get("/events", {"slug": state.slug})
-            if isinstance(data, list) and data:
-                info = _extract_market_info(data[0])
-                if info and info.get("winning_index") is not None:
-                    state.winning_index = info["winning_index"]
-                    break
-        except Exception as e:
-            logger.warning(f"resolution fetch error: {e}")
+    # Market closed — try to fetch resolution
+    # UMA resolution typically takes 20-60 seconds after close
+    # Do a background retry so the main loop can proceed to next market
+    print(f"  Market closed. Resolution will be fetched in background...")
+    # Return immediately with winning_index=None; the final report
+    # will do a retroactive resolution fetch for all markets.
 
     summary = summarize_market(state)
     print(
@@ -517,6 +558,43 @@ async def main():
             )
             results.append(result)
 
+        # Retroactive resolution fetch — wait for UMA then retry any unresolved
+        print("\n" + "=" * 90)
+        print("  FETCHING FINAL RESOLUTIONS (waiting 30s for UMA)...")
+        print("=" * 90)
+        await asyncio.sleep(30)
+
+        for r in results:
+            if r.get("action") == "PAUSED":
+                continue
+            if r.get("winning_idx") is not None:
+                continue  # already known
+            slug = r.get("slug", "")
+            if not slug:
+                continue
+            # Retry up to 5 times with 10s between
+            for retry in range(5):
+                try:
+                    data = await gamma.get("/events", {"slug": slug})
+                    if isinstance(data, list) and data:
+                        info = _extract_market_info(data[0])
+                        if info and info.get("winning_index") is not None:
+                            r["winning_idx"] = info["winning_index"]
+                            # Recompute P&L with the actual outcome
+                            if "position" in r and r.get("position") and r.get("entry_price"):
+                                pos_idx = 0 if r["position"] == "YES" else 1
+                                size = r.get("size", 0)
+                                entry = r["entry_price"]
+                                # reconstruct from saved state
+                                realized = r.get("realized_pnl_flips", 0.0)
+                                cost = r.get("cost_basis", 0.0)
+                                settlement = size if pos_idx == r["winning_idx"] else 0.0
+                                r["pnl"] = round(realized + settlement - cost, 2)
+                            break
+                except Exception:
+                    pass
+                await asyncio.sleep(10)
+
         # Summary
         print("\n" + "=" * 90)
         print("  SESSION COMPLETE")
@@ -531,11 +609,14 @@ async def main():
         total_pnl = sum(r["pnl"] for r in traded)
         wins = sum(1 for r in traded if r["pnl"] > 0)
         losses = sum(1 for r in traded if r["pnl"] < 0)
+        flats = sum(1 for r in traded if r["pnl"] == 0)
+        resolved = sum(1 for r in traded if r.get("winning_idx") is not None)
 
         print(f"  Markets traded: {len(traded)}")
         print(f"  Markets paused: {len(paused)}")
+        print(f"  Markets resolved: {resolved}/{len(traded)}")
         print(f"  Total P&L: ${total_pnl:+.2f}")
-        print(f"  Wins/Losses: {wins}/{losses}")
+        print(f"  Wins / Losses / Flats: {wins} / {losses} / {flats}")
         print(f"\n  Confusion detector final: {confusion.status()}")
 
         print("\n  Per-market breakdown:")
@@ -544,7 +625,10 @@ async def main():
                 print(f"    PAUSED  {r['slug']}: {r.get('reason', '')}")
             else:
                 marker = "WIN " if r["pnl"] > 0 else ("LOSS" if r["pnl"] < 0 else "FLAT")
-                print(f"    {marker}  {r['slug']}: ${r['pnl']:+.2f}")
+                win_idx = r.get("winning_idx")
+                win_str = ("UP" if win_idx == 0 else "DOWN") if win_idx is not None else "?"
+                pos = r.get("position", "-")
+                print(f"    {marker}  {r['slug']}: ${r['pnl']:+.2f}  pos={pos}  outcome={win_str}")
 
         print("=" * 90)
 
