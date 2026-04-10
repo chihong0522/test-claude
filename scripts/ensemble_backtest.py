@@ -263,7 +263,9 @@ def simulate_market(market: dict, trades: list[dict], cfg: BacktestConfig) -> di
 
     sustained_yes = 0
     sustained_no = 0
-    position: tuple[str, float, float] | None = None  # (side, entry_up_price, size_shares)
+    # Position state: (side, entry_up_price, size_shares, cost_basis_usd)
+    position: tuple[str, float, float, float] | None = None
+    realized_pnl = 0.0  # booked on each flip
     entries = 0
     flips = 0
 
@@ -342,18 +344,23 @@ def simulate_market(market: dict, trades: list[dict], cfg: BacktestConfig) -> di
             continue
 
         if position is None:
+            # Fresh entry: spend fixed $position_size_usd (with fee)
             size = cfg.position_size_usd / our_entry_price
-            position = (signal, our_entry_price, size)
+            cost_basis = cfg.position_size_usd * (1 + cfg.fee_pct)
+            position = (signal, our_entry_price, size, cost_basis)
             entries += 1
         elif position[0] != signal:
             if not cfg.allow_flips:
                 continue  # hold original position
-            # Flip: sell current at current price, buy other side
-            old_side, old_entry, old_size = position
+            # Flip: close old position at current price, book realized P&L
+            old_side, old_entry, old_size, old_cost = position
             old_current = current_up_price if old_side == "YES" else 1.0 - current_up_price
             proceeds = old_size * old_current * (1 - cfg.fee_pct)
-            new_size = proceeds / our_entry_price
-            position = (signal, our_entry_price, new_size)
+            realized_pnl += proceeds - old_cost
+            # Open fresh $position_size_usd position on new side (NO compounding)
+            new_size = cfg.position_size_usd / our_entry_price
+            new_cost = cfg.position_size_usd * (1 + cfg.fee_pct)
+            position = (signal, our_entry_price, new_size, new_cost)
             flips += 1
 
     if position is None:
@@ -364,11 +371,11 @@ def simulate_market(market: dict, trades: list[dict], cfg: BacktestConfig) -> di
             "winning_idx": winning_idx,
         }
 
-    side, entry, size = position
+    side, entry, size, cost_basis = position
     pos_idx = 0 if side == "YES" else 1
-    cost = size * entry * (1 + cfg.fee_pct)
     settlement = size * 1.0 if pos_idx == winning_idx else 0.0
-    pnl = settlement - cost
+    final_pnl = settlement - cost_basis
+    total_pnl = realized_pnl + final_pnl
 
     return {
         "market": market["condition_id"],
@@ -378,7 +385,9 @@ def simulate_market(market: dict, trades: list[dict], cfg: BacktestConfig) -> di
         "size_shares": round(size, 2),
         "winning_idx": winning_idx,
         "correct": pos_idx == winning_idx,
-        "pnl": round(pnl, 2),
+        "pnl": round(total_pnl, 2),
+        "realized_pnl_from_flips": round(realized_pnl, 2),
+        "final_settlement_pnl": round(final_pnl, 2),
         "entries": entries,
         "flips": flips,
     }
@@ -426,6 +435,7 @@ async def main():
     parser.add_argument("--top-leaders", type=int, default=10, help="Number of leader wallets")
     parser.add_argument("--position-size", type=float, default=60.0, help="Size in USD per trade")
     parser.add_argument("--train-fraction", type=float, default=0.7, help="Fraction of markets for train set")
+    parser.add_argument("--only-a-j", action="store_true", help="Run only Config A and J (faster output)")
     args = parser.parse_args()
 
     print("=" * 88)
@@ -587,7 +597,32 @@ async def main():
             allow_flips=True,
             position_size_usd=args.position_size,
         ),
+        BacktestConfig(
+            name="K) All 50 smart — min 10 votes (stricter), no filters, flips",
+            leader_wallets=smart_set,
+            min_signal_strength=10,
+            signal_dominance=2.0,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            position_size_usd=args.position_size,
+        ),
+        BacktestConfig(
+            name="L) All 50 smart — min 15 votes (very strict), flips",
+            leader_wallets=smart_set,
+            min_signal_strength=15,
+            signal_dominance=2.0,
+            apply_drift_filter=False,
+            apply_time_filter=False,
+            apply_sustained=False,
+            allow_flips=True,
+            position_size_usd=args.position_size,
+        ),
     ]
+
+    if args.only_a_j:
+        configs = [c for c in configs if c.name[:2] in ("A)", "J)", "K)", "L)")]
 
     for cfg in configs:
         results = []
