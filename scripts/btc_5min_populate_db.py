@@ -80,25 +80,38 @@ async def main():
 
         print("Saving to database...")
         async with async_session() as session:
-            # Clear old scores for clean dashboard
-            await session.execute(delete(TraderScore))
-            await session.execute(delete(Trader))
+            # Keep score history — only clear very old records (>14 days)
+            # so we can track score trends over time
+            from datetime import timedelta
+            cutoff = datetime.utcnow() - timedelta(days=14)
+            await session.execute(
+                delete(TraderScore).where(TraderScore.scored_at < cutoff)
+            )
             await session.commit()
 
             top_10_for_report = []
 
             for rank, m in enumerate(top_100, start=1):
                 wallet_addr = m["wallet"]
-                # Upsert trader
-                trader = Trader(
-                    proxy_wallet=wallet_addr,
-                    name=m.get("name") or wallet_addr[:10],
-                    pseudonym=m.get("name"),
-                    first_seen_at=datetime.utcnow(),
-                    last_updated_at=datetime.utcnow(),
-                    is_active=True,
+                # Upsert trader — keep first_seen_at if already exists
+                existing = await session.execute(
+                    select(Trader).where(Trader.proxy_wallet == wallet_addr)
                 )
-                session.add(trader)
+                trader = existing.scalar_one_or_none()
+                if trader is None:
+                    trader = Trader(
+                        proxy_wallet=wallet_addr,
+                        name=m.get("name") or wallet_addr[:10],
+                        pseudonym=m.get("name"),
+                        first_seen_at=datetime.utcnow(),
+                        last_updated_at=datetime.utcnow(),
+                        is_active=True,
+                    )
+                    session.add(trader)
+                else:
+                    trader.name = m.get("name") or wallet_addr[:10]
+                    trader.last_updated_at = datetime.utcnow()
+                    trader.is_active = True
                 await session.flush()
 
                 # Compute derived metrics to fill the scoring schema

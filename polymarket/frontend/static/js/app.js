@@ -51,6 +51,9 @@ async function route() {
     } else if (path.startsWith('/traders/')) {
         document.querySelector('[data-page="traders"]')?.classList.add('nav-active');
         await renderTraderDetail(path.split('/traders/')[1]);
+    } else if (path === '/rotation') {
+        document.querySelector('[data-page="rotation"]')?.classList.add('nav-active');
+        await renderRotation();
     } else if (path === '/backtest') {
         document.querySelector('[data-page="backtest"]')?.classList.add('nav-active');
         await renderBacktest();
@@ -372,6 +375,116 @@ function renderBacktestResults(bt) {
             },
         });
     }
+}
+
+// ── Rotation ─────────────────────────────────────────────────────────────────
+
+async function renderRotation() {
+    app.innerHTML = '<p class="text-gray-400">Loading rotation data...</p>';
+    try {
+        // Default compare against 6h ago
+        const hoursParam = new URLSearchParams(location.hash.split('?')[1] || '').get('hours') || '6';
+        const data = await api(`/traders/_rotation/recent-changes?hours=${hoursParam}`);
+
+        let html = `<div class="space-y-6">
+            <div class="card">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h2 class="text-xl font-bold">Rotation Tracker</h2>
+                        <p class="text-sm text-gray-500 mt-1">
+                            Comparing latest vs ${hoursParam}h ago |
+                            Rising: <span class="text-green-600 font-medium">${data.counts.rising}</span> |
+                            Declining: <span class="text-red-600 font-medium">${data.counts.declining}</span> |
+                            New: <span class="text-blue-600 font-medium">${data.counts.new}</span> |
+                            Stable: <span class="text-gray-500">${data.counts.stable}</span>
+                        </p>
+                    </div>
+                    <div class="text-sm">
+                        <label class="text-gray-500 mr-2">Window:</label>
+                        <select onchange="location.hash='#/rotation?hours='+this.value" class="border rounded px-2 py-1">
+                            <option value="1" ${hoursParam==='1'?'selected':''}>1h</option>
+                            <option value="6" ${hoursParam==='6'?'selected':''}>6h</option>
+                            <option value="12" ${hoursParam==='12'?'selected':''}>12h</option>
+                            <option value="24" ${hoursParam==='24'?'selected':''}>24h</option>
+                            <option value="72" ${hoursParam==='72'?'selected':''}>3d</option>
+                            <option value="168" ${hoursParam==='168'?'selected':''}>7d</option>
+                        </select>
+                    </div>
+                </div>
+                <p class="text-xs text-gray-400 mt-3">
+                    Run a new scan with <code>python scripts/btc_5min_populate_db.py</code> and refresh to see changes.
+                    For BTC 5-min markets, re-scan every 4-12 hours and re-check this page to catch declining traders.
+                </p>
+            </div>`;
+
+        // Rising
+        if (data.rising.length > 0) {
+            html += '<div class="card border-l-4 border-green-500">';
+            html += `<h3 class="text-lg font-semibold text-green-700 mb-3">Rising (+3 or more)</h3>`;
+            html += rotationTable(data.rising, 'up');
+            html += '</div>';
+        }
+
+        // New traders
+        if (data.new_traders.length > 0) {
+            html += '<div class="card border-l-4 border-blue-500">';
+            html += `<h3 class="text-lg font-semibold text-blue-700 mb-3">New Entrants</h3>`;
+            html += rotationTable(data.new_traders, 'new');
+            html += '</div>';
+        }
+
+        // Declining — action items!
+        if (data.declining.length > 0) {
+            html += '<div class="card border-l-4 border-red-500">';
+            html += `<h3 class="text-lg font-semibold text-red-700 mb-3">Declining — Consider Stopping Copy</h3>`;
+            html += rotationTable(data.declining, 'down');
+            html += '</div>';
+        }
+
+        // Stable top
+        if (data.stable_top.length > 0) {
+            html += '<div class="card">';
+            html += `<h3 class="text-lg font-semibold text-gray-700 mb-3">Stable Top 10</h3>`;
+            html += rotationTable(data.stable_top, 'stable');
+            html += '</div>';
+        }
+
+        if (data.counts.rising === 0 && data.counts.declining === 0 && data.counts.new === 0) {
+            html += '<div class="card"><p class="text-gray-500">No changes detected. Run another scan to populate history.</p></div>';
+        }
+
+        html += '</div>';
+        app.innerHTML = html;
+    } catch (e) {
+        app.innerHTML = `<div class="card"><p class="text-red-500">Error: ${e.message}</p></div>`;
+    }
+}
+
+function rotationTable(rows, kind) {
+    let html = '<div class="overflow-x-auto"><table class="w-full text-sm">';
+    html += `<thead><tr class="text-left text-gray-500 border-b">
+        <th class="pb-2">Name</th>
+        <th class="pb-2">Tier</th>
+        <th class="pb-2">Score</th>`;
+    if (kind !== 'new' && kind !== 'stable') {
+        html += '<th class="pb-2">Change</th>';
+    }
+    html += '<th class="pb-2">Wallet</th></tr></thead><tbody>';
+
+    for (const r of rows) {
+        const deltaStr = r.delta === null || r.delta === undefined ? '—' :
+            (r.delta > 0 ? `<span class="text-green-600">+${r.delta}</span>` : `<span class="text-red-600">${r.delta}</span>`);
+        const changeCol = (kind !== 'new' && kind !== 'stable') ? `<td>${deltaStr}</td>` : '';
+        html += `<tr class="border-b hover:bg-gray-50 cursor-pointer" onclick="location.hash='#/traders/${r.wallet}'">
+            <td class="py-2 font-medium">${r.name}</td>
+            <td>${tierBadge(r.current_tier)}</td>
+            <td>${r.current_score}</td>
+            ${changeCol}
+            <td class="font-mono text-xs text-gray-400">${r.wallet}</td>
+        </tr>`;
+    }
+    html += '</tbody></table></div>';
+    return html;
 }
 
 // ── Reports ──────────────────────────────────────────────────────────────────

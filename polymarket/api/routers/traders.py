@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -164,6 +166,153 @@ async def get_trader_trades(
             transaction_hash=t.transaction_hash,
         )
         for t in trades
+    ]
+
+
+@router.get("/_rotation/recent-changes")
+async def get_rotation_changes(
+    hours: float = Query(6.0, ge=0.01, le=720),
+    session: AsyncSession = Depends(get_session),
+):
+    """Compare latest scores vs scores from N hours ago.
+
+    Returns rising, declining, new, and dropped traders — helps decide
+    who to start/stop copying.
+    """
+    from datetime import timedelta
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(hours=hours)
+
+    # Latest score per trader
+    latest_sub = (
+        select(
+            TraderScore.trader_id,
+            func.max(TraderScore.scored_at).label("latest"),
+        )
+        .group_by(TraderScore.trader_id)
+        .subquery()
+    )
+    latest_result = await session.execute(
+        select(TraderScore, Trader)
+        .join(Trader, TraderScore.trader_id == Trader.id)
+        .join(
+            latest_sub,
+            (TraderScore.trader_id == latest_sub.c.trader_id)
+            & (TraderScore.scored_at == latest_sub.c.latest),
+        )
+    )
+    latest_rows = latest_result.all()
+
+    # Previous score per trader (most recent before cutoff)
+    prev_sub = (
+        select(
+            TraderScore.trader_id,
+            func.max(TraderScore.scored_at).label("prev"),
+        )
+        .where(TraderScore.scored_at < cutoff)
+        .group_by(TraderScore.trader_id)
+        .subquery()
+    )
+    prev_result = await session.execute(
+        select(TraderScore)
+        .join(
+            prev_sub,
+            (TraderScore.trader_id == prev_sub.c.trader_id)
+            & (TraderScore.scored_at == prev_sub.c.prev),
+        )
+    )
+    prev_by_trader = {s.trader_id: s for s in prev_result.scalars().all()}
+
+    rising = []
+    declining = []
+    new_traders = []
+    stable = []
+
+    for latest_score, trader in latest_rows:
+        prev = prev_by_trader.get(latest_score.trader_id)
+        row = {
+            "wallet": trader.proxy_wallet,
+            "name": trader.name or trader.proxy_wallet[:10],
+            "current_score": round(latest_score.composite_score, 1),
+            "current_tier": latest_score.tier,
+            "current_rank": None,
+            "passes_checklist": latest_score.passes_checklist,
+        }
+
+        if prev is None:
+            row["delta"] = None
+            row["prev_score"] = None
+            row["prev_tier"] = None
+            new_traders.append(row)
+            continue
+
+        delta = round(latest_score.composite_score - prev.composite_score, 1)
+        row["delta"] = delta
+        row["prev_score"] = round(prev.composite_score, 1)
+        row["prev_tier"] = prev.tier
+
+        if delta > 3:
+            rising.append(row)
+        elif delta < -3:
+            declining.append(row)
+        else:
+            stable.append(row)
+
+    rising.sort(key=lambda r: r["delta"], reverse=True)
+    declining.sort(key=lambda r: r["delta"])
+    new_traders.sort(key=lambda r: r["current_score"], reverse=True)
+    stable.sort(key=lambda r: r["current_score"], reverse=True)
+
+    return {
+        "compared_hours": hours,
+        "cutoff": cutoff.isoformat(),
+        "now": now.isoformat(),
+        "counts": {
+            "rising": len(rising),
+            "declining": len(declining),
+            "new": len(new_traders),
+            "stable": len(stable),
+        },
+        "rising": rising[:20],
+        "declining": declining[:20],
+        "new_traders": new_traders[:20],
+        "stable_top": stable[:10],
+    }
+
+
+@router.get("/{wallet}/score-history")
+async def get_trader_score_history(
+    wallet: str,
+    limit: int = Query(30, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return score history (most recent first) for tracking trader trends."""
+    result = await session.execute(select(Trader).where(Trader.proxy_wallet == wallet))
+    trader = result.scalar_one_or_none()
+    if not trader:
+        raise HTTPException(404, "Trader not found")
+
+    history_result = await session.execute(
+        select(TraderScore)
+        .where(TraderScore.trader_id == trader.id)
+        .order_by(TraderScore.scored_at.desc())
+        .limit(limit)
+    )
+    history = history_result.scalars().all()
+
+    return [
+        {
+            "scored_at": s.scored_at.isoformat(),
+            "composite_score": round(s.composite_score, 1),
+            "tier": s.tier,
+            "roi": round(s.roi * 100, 2),
+            "win_rate": round(s.win_rate * 100, 1),
+            "trade_count": s.trade_count,
+            "net_profit": round(s.net_profit, 2),
+            "passes_checklist": s.passes_checklist,
+        }
+        for s in history
     ]
 
 
