@@ -117,6 +117,16 @@ class MarketTradingState:
     flip_cooldown_sec: int = 60  # no flip within N seconds of the last entry/flip
     min_adverse_move: float = 0.15  # price must move >= this much against us before we flip
 
+    # Exit rules (profit-take / stop-loss / late-window de-risking).
+    # Once an exit fires, the position is closed and no re-entry is attempted
+    # for this market. See process_voting()'s `state.exited` guard.
+    exits_enabled: bool = True
+    profit_take_threshold: float = 0.20  # sell when our side price rises +N since entry
+    stop_loss_threshold: float = 0.25  # sell when our side price drops -N since entry
+    stop_loss_min_remaining: int = 60  # only stop-loss if this much time is still left
+    late_window_sec: int = 30  # "late" means this many seconds before market close
+    late_window_min_price: float = 0.70  # in late window, sell if our side price < N
+
     # WebSocket event tracking
     ws_trade_events: deque = field(default_factory=lambda: deque(maxlen=500))
     ws_events_count: int = 0
@@ -137,6 +147,9 @@ class MarketTradingState:
     buckets_processed: set[int] = field(default_factory=set)
     last_position_change_ts: float = 0.0  # unix ts of last ENTER/FLIP (for cooldown)
     entry_ws_price: float = 0.0  # ws_latest_up_price captured at entry/flip time
+    exited: bool = False  # once an EXIT fires, block further trades on this market
+    exit_side: str | None = None  # "YES"/"NO" — side that was held when we exited (for summary)
+    exit_reason: str | None = None  # why we exited (profit_take / stop_loss / late_window)
 
     # Resolution
     winning_index: int | None = None
@@ -221,6 +234,79 @@ async def poll_http_trades(
     return new_count
 
 
+def check_exit_signal(state: MarketTradingState, now_ts: int) -> str | None:
+    """Decide whether to exit our current position.
+
+    Motivated by the observation from a public Polymarket trading article:
+    "The goal is not to always hold shares until the market resolves. As soon
+    as you have an appropriate profit, you sell and exit."
+
+    Three independent rules, any of which triggers a sell:
+      1. Profit-take: our-side price has risen >= profit_take_threshold vs entry
+      2. Stop-loss:   our-side price has dropped >= stop_loss_threshold vs entry,
+                      AND there's at least stop_loss_min_remaining seconds left
+                      (so we don't stop out on normal noise near close)
+      3. Late-window: with < late_window_sec left AND our-side price < late_window_min_price,
+                      sell to avoid last-second reversals on uncleared markets
+
+    Returns an exit reason string or None if no exit.
+    """
+    if not state.exits_enabled or state.exited or state.position is None:
+        return None
+
+    side, entry_price, _size, _cost = state.position
+    current_up = state.ws_latest_up_price
+    if current_up <= 0:  # no WS price yet
+        return None
+    current_our_price = current_up if side == "YES" else 1.0 - current_up
+    delta = current_our_price - entry_price  # positive = profitable
+    time_to_close = state.end_ts - now_ts
+
+    # Rule 1 — profit-take
+    if delta >= state.profit_take_threshold:
+        return f"profit_take (+{delta:.2f})"
+
+    # Rule 2 — stop-loss (only meaningful while there's time for further adverse move)
+    if delta <= -state.stop_loss_threshold and time_to_close >= state.stop_loss_min_remaining:
+        return f"stop_loss ({delta:.2f})"
+
+    # Rule 3 — late-window de-risking
+    if time_to_close <= state.late_window_sec and current_our_price < state.late_window_min_price:
+        return f"late_window (price={current_our_price:.2f})"
+
+    return None
+
+
+def execute_exit(state: MarketTradingState, now_ts: int, reason: str) -> None:
+    """Close the current position at current WS mid, book P&L to realized_pnl,
+    mark the market as exited so no re-entry happens."""
+    if state.position is None:
+        return
+    side, entry_price, size, cost = state.position
+    current_up = state.ws_latest_up_price
+    current_our_price = current_up if side == "YES" else 1.0 - current_up
+    proceeds = size * current_our_price * (1 - state.fee_pct)
+    state.realized_pnl += proceeds - cost
+    state.exited = True
+    state.exit_side = side
+    state.exit_reason = reason
+    state.position = None
+    bi = int((now_ts - state.start_ts) // 10)
+    state.actions.append(
+        {
+            "bucket": bi,
+            "action": "EXIT",
+            "side": side,
+            "price": round(current_our_price, 4),
+            "entry": round(entry_price, 4),
+            "delta": round(current_our_price - entry_price, 4),
+            "realized_delta": round(proceeds - cost, 2),
+            "reason": reason,
+            "ts": now_ts,
+        }
+    )
+
+
 def process_voting(state: MarketTradingState, now_ts: int):
     """Voting logic: process NEW buckets only, enter at CURRENT WS price.
 
@@ -238,6 +324,11 @@ def process_voting(state: MarketTradingState, now_ts: int):
         the current position. Without these, 3-wallet consensus flips ate
         the 4% round-trip fee in the first live test.
     """
+    # Once an exit has fired on this market, don't re-enter — the exit rule
+    # already realized P&L, and re-entering would churn the position.
+    if state.exited:
+        return
+
     buckets: dict[int, list[dict]] = defaultdict(list)
     for t in state.http_trades:
         ts = int(t.get("timestamp") or 0)
@@ -416,7 +507,21 @@ def summarize_market(state: MarketTradingState) -> dict:
     }
 
     if state.position is None:
-        result.update({"pnl": 0.0, "position": None, "winning_idx": state.winning_index})
+        # Three sub-cases:
+        #   (a) No trade ever — realized_pnl == 0, return flat
+        #   (b) Exited via profit-take / stop-loss / late-window — pnl = realized_pnl
+        #       (no settlement credit because we already sold before resolution)
+        #   (c) Flipped and closed — same as (b)
+        result.update(
+            {
+                "pnl": round(state.realized_pnl, 2),
+                "position": None,
+                "exited": state.exited,
+                "exit_side": state.exit_side,
+                "exit_reason": state.exit_reason,
+                "winning_idx": state.winning_index,
+            }
+        )
         return result
 
     side, entry, size, cost = state.position
@@ -483,6 +588,12 @@ async def trade_one_market(
     min_flip_strength: int = 9,
     flip_cooldown_sec: int = 60,
     min_adverse_move: float = 0.15,
+    exits_enabled: bool = True,
+    profit_take_threshold: float = 0.20,
+    stop_loss_threshold: float = 0.25,
+    stop_loss_min_remaining: int = 60,
+    late_window_sec: int = 30,
+    late_window_min_price: float = 0.70,
 ) -> dict:
     """Trade one market with WebSocket-driven polling."""
     slug_ts = market_info["_slug_ts"]
@@ -508,6 +619,12 @@ async def trade_one_market(
         min_flip_strength=min_flip_strength,
         flip_cooldown_sec=flip_cooldown_sec,
         min_adverse_move=min_adverse_move,
+        exits_enabled=exits_enabled,
+        profit_take_threshold=profit_take_threshold,
+        stop_loss_threshold=stop_loss_threshold,
+        stop_loss_min_remaining=stop_loss_min_remaining,
+        late_window_sec=late_window_sec,
+        late_window_min_price=late_window_min_price,
     )
 
     # Check confusion detector
@@ -581,6 +698,19 @@ async def trade_one_market(
                 if new_trades > 0 or trigger_reason == "BURST":
                     process_voting(state, now_int)
 
+            # Exit-signal check runs every main-loop tick (200ms), not only on
+            # HTTP polls, so profit-take / stop-loss can fire on pure WS price
+            # moves. Fires at most once per market (execute_exit sets state.exited).
+            if state.position is not None and not state.exited:
+                reason = check_exit_signal(state, now_int)
+                if reason is not None:
+                    print(
+                        f"    [{_fmt_ts(now_int)}] EXIT {state.position[0]} "
+                        f"@ {(state.ws_latest_up_price if state.position[0] == 'YES' else 1 - state.ws_latest_up_price):.3f} — {reason}",
+                        flush=True,
+                    )
+                    execute_exit(state, now_int, reason)
+
             # Print status every 10 seconds
             if now_int - last_status_print >= 10:
                 last_status_print = now_int
@@ -618,18 +748,43 @@ async def trade_one_market(
 
     summary = summarize_market(state)
     for a in state.actions:
-        print(
-            f"    b{a['bucket']:3d}: {a['action']:5s} {a['side']} @ {a['price']}  "
-            f"(wallets {a.get('yes_wallets', 0)}Y/{a.get('no_wallets', 0)}N, "
-            f"remaining {a.get('remaining_s', 0)}s)"
-        )
+        action = a.get("action", "")
+        side = a.get("side", "-")
+        price = a.get("price", 0.0)
+        if action in ("ENTER", "FLIP"):
+            print(
+                f"    b{a['bucket']:3d}: {action:9s} {side} @ {price}  "
+                f"(wallets {a.get('yes_wallets', 0)}Y/{a.get('no_wallets', 0)}N, "
+                f"remaining {a.get('remaining_s', 0)}s)"
+            )
+        elif action == "EXIT":
+            print(
+                f"    b{a['bucket']:3d}: EXIT      {side} @ {price}  "
+                f"(entry={a.get('entry', 0):.2f}, delta={a.get('delta', 0):+.2f}, "
+                f"realized={a.get('realized_delta', 0):+.2f}) — {a.get('reason', '')}"
+            )
+        elif action == "SKIP_FLIP":
+            print(
+                f"    b{a['bucket']:3d}: SKIP_FLIP {side} — {a.get('reason', '')}"
+            )
+        else:
+            print(f"    b{a['bucket']:3d}: {action}")
 
-    # Record outcome for confusion detector
-    had_signal = state.position is not None
+    # Record outcome for confusion detector.
+    # A market is "signal-bearing" if we entered at any point, even if we
+    # subsequently exited (the ensemble voted, which is what the detector
+    # cares about).
+    has_entered = any(a.get("action") in ("ENTER", "FLIP") for a in state.actions)
+    has_open_position = state.position is not None
+    had_signal = has_entered or has_open_position
     was_correct: bool | None = None
-    if had_signal and state.winning_index is not None:
-        pos_idx = 0 if state.position[0] == "YES" else 1
-        was_correct = pos_idx == state.winning_index
+    if state.winning_index is not None:
+        if has_open_position:
+            pos_idx = 0 if state.position[0] == "YES" else 1
+            was_correct = pos_idx == state.winning_index
+        elif state.exited and state.exit_side is not None:
+            pos_idx = 0 if state.exit_side == "YES" else 1
+            was_correct = pos_idx == state.winning_index
 
     yes_count = sum(
         1 for t in state.http_trades
@@ -729,6 +884,47 @@ async def main():
         action="store_true",
         help="Disable flips entirely (equivalent to --min-flip-strength 999)",
     )
+    parser.add_argument(
+        "--profit-take",
+        type=float,
+        default=0.20,
+        help=(
+            "Sell when our side's price has risen by this much since entry. "
+            "Turns the 'always hold to resolution' strategy into a profit-taker."
+        ),
+    )
+    parser.add_argument(
+        "--stop-loss",
+        type=float,
+        default=0.25,
+        help="Sell when our side's price has dropped by this much since entry",
+    )
+    parser.add_argument(
+        "--stop-loss-min-remaining",
+        type=int,
+        default=60,
+        help="Only stop-loss while at least N seconds remain in the market",
+    )
+    parser.add_argument(
+        "--late-window-sec",
+        type=int,
+        default=30,
+        help="Treat the last N seconds of a market as the late-window (de-risking zone)",
+    )
+    parser.add_argument(
+        "--late-window-min-price",
+        type=float,
+        default=0.70,
+        help=(
+            "In the late window, sell if our side's price is below this threshold. "
+            "Kills near-close reversals on uncleared positions."
+        ),
+    )
+    parser.add_argument(
+        "--no-exits",
+        action="store_true",
+        help="Disable profit-take / stop-loss / late-window exits (hold to resolution)",
+    )
     args = parser.parse_args()
 
     # Resolve --no-flips and auto-default for min-flip-strength
@@ -752,6 +948,14 @@ async def main():
         print(
             f"  Flip gates:   strength>={args.min_flip_strength}, "
             f"cooldown>={args.flip_cooldown_sec}s, adverse>={args.min_adverse_move:.2f}"
+        )
+    if args.no_exits:
+        print(f"  Exits:        DISABLED (hold to resolution)")
+    else:
+        print(
+            f"  Exit rules:   profit>=+{args.profit_take:.2f}, "
+            f"stop<=-{args.stop_loss:.2f} (if >={args.stop_loss_min_remaining}s left), "
+            f"late<{args.late_window_min_price:.2f} (<{args.late_window_sec}s left)"
         )
     print(f"  Mode:         PAPER (no real money)")
     print(f"  Polling:      {BASELINE_POLL_INTERVAL}s baseline + burst-triggered HTTP")
@@ -807,6 +1011,12 @@ async def main():
                 min_flip_strength=args.min_flip_strength,
                 flip_cooldown_sec=args.flip_cooldown_sec,
                 min_adverse_move=args.min_adverse_move,
+                exits_enabled=(not args.no_exits),
+                profit_take_threshold=args.profit_take,
+                stop_loss_threshold=args.stop_loss,
+                stop_loss_min_remaining=args.stop_loss_min_remaining,
+                late_window_sec=args.late_window_sec,
+                late_window_min_price=args.late_window_min_price,
             )
             results.append(result)
 
@@ -895,7 +1105,10 @@ async def main():
                 marker = "WIN " if r["pnl"] > 0 else ("LOSS" if r["pnl"] < 0 else "FLAT")
                 win_idx = r.get("winning_idx")
                 win_str = ("UP" if win_idx == 0 else "DOWN") if win_idx is not None else "?"
-                pos = r.get("position", "-")
+                if r.get("exited"):
+                    pos = f"{r.get('exit_side', '?')}(EXIT:{r.get('exit_reason', '')})"
+                else:
+                    pos = r.get("position", "-")
                 burst = r.get("burst_triggered_polls", 0)
                 print(f"    {marker}  {r['slug']}: ${r['pnl']:+.2f}  pos={pos}  outcome={win_str}  bursts={burst}")
 
