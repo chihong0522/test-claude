@@ -108,8 +108,14 @@ class MarketTradingState:
     min_signal_strength: int = 7  # distinct wallets (not raw votes)
     signal_dominance: float = 2.0
     min_seconds_remaining: int = 180  # time gate: only fire with >= 3 min left
+    max_bucket_age_sec: int = 30  # staleness gate: skip buckets older than this when we poll them
     position_size_usd: float = 60.0
     fee_pct: float = 0.02
+
+    # Flip-specific gates (all must pass to flip an existing position)
+    min_flip_strength: int = 5  # stricter wallet count for flips (default = min_signal_strength + 2)
+    flip_cooldown_sec: int = 60  # no flip within N seconds of the last entry/flip
+    min_adverse_move: float = 0.15  # price must move >= this much against us before we flip
 
     # WebSocket event tracking
     ws_trade_events: deque = field(default_factory=lambda: deque(maxlen=500))
@@ -129,6 +135,8 @@ class MarketTradingState:
     realized_pnl: float = 0.0
     actions: list[dict] = field(default_factory=list)
     buckets_processed: set[int] = field(default_factory=set)
+    last_position_change_ts: float = 0.0  # unix ts of last ENTER/FLIP (for cooldown)
+    entry_ws_price: float = 0.0  # ws_latest_up_price captured at entry/flip time
 
     # Resolution
     winning_index: int | None = None
@@ -216,10 +224,19 @@ async def poll_http_trades(
 def process_voting(state: MarketTradingState, now_ts: int):
     """Voting logic: process NEW buckets only, enter at CURRENT WS price.
 
-    Upgraded per Config N:
+    Upgraded per Config N + post-10-cycle optimizations:
       - Counts DISTINCT wallets, not raw votes (kills "3 bots firing 7 trades" loophole)
       - Time gate: signals with < min_seconds_remaining in the window are rejected
         (empirically, signals in the last 180s of a 5-min window are ~50% noise)
+      - Staleness gate: skip buckets whose bucket_start_ts is older than
+        max_bucket_age_sec — prevents the "late-join replay trade" bug where
+        the bot enters on a bucket-2 signal several minutes after it fired, at
+        a much worse current price.
+      - Flip gates: flipping an existing position requires (a) a stricter
+        distinct-wallet count than entry, (b) a cooldown since the last
+        entry/flip, and (c) the WS mid has moved min_adverse_move against
+        the current position. Without these, 3-wallet consensus flips ate
+        the 4% round-trip fee in the first live test.
     """
     buckets: dict[int, list[dict]] = defaultdict(list)
     for t in state.http_trades:
@@ -242,6 +259,16 @@ def process_voting(state: MarketTradingState, now_ts: int):
         bucket_start_ts = state.start_ts + bi * 10
         seconds_remaining = state.end_ts - bucket_start_ts
         if seconds_remaining < state.min_seconds_remaining:
+            continue
+
+        # Staleness gate — reject buckets that already fired their signal
+        # long ago (bot joined the market late). The bot processes historical
+        # trades for the full 5-min window each poll, so without this guard
+        # it will "replay" bucket-2 signals at t+180s at the CURRENT price,
+        # which is materially worse than when the smart wallets actually
+        # voted. See cycles 1 and 7 of the first post-fix test.
+        bucket_age = now_ts - (bucket_start_ts + 10)  # use bucket END, not start
+        if bucket_age > state.max_bucket_age_sec:
             continue
 
         bucket = buckets[bi]
@@ -290,6 +317,8 @@ def process_voting(state: MarketTradingState, now_ts: int):
             size = state.position_size_usd / our_entry_price
             cost = state.position_size_usd * (1 + state.fee_pct)
             state.position = (signal, our_entry_price, size, cost)
+            state.last_position_change_ts = now_ts
+            state.entry_ws_price = current_up
             state.actions.append(
                 {
                     "bucket": bi,
@@ -303,13 +332,63 @@ def process_voting(state: MarketTradingState, now_ts: int):
                 }
             )
         elif state.position[0] != signal:
-            old_side, old_entry, old_size, old_cost = state.position
+            # Flip gates — all three must pass
+            count_for_signal = yes_count if signal == "YES" else no_count
+            if count_for_signal < state.min_flip_strength:
+                state.actions.append(
+                    {
+                        "bucket": bi,
+                        "action": "SKIP_FLIP",
+                        "reason": f"strength {count_for_signal}<{state.min_flip_strength}",
+                        "side": signal,
+                        "ts": now_ts,
+                    }
+                )
+                continue
+            if now_ts - state.last_position_change_ts < state.flip_cooldown_sec:
+                state.actions.append(
+                    {
+                        "bucket": bi,
+                        "action": "SKIP_FLIP",
+                        "reason": (
+                            f"cooldown {now_ts - state.last_position_change_ts:.0f}s"
+                            f"<{state.flip_cooldown_sec}s"
+                        ),
+                        "side": signal,
+                        "ts": now_ts,
+                    }
+                )
+                continue
+            old_side = state.position[0]
+            moving_against = (
+                (old_side == "YES" and current_up < state.entry_ws_price - state.min_adverse_move)
+                or (old_side == "NO" and current_up > state.entry_ws_price + state.min_adverse_move)
+            )
+            if not moving_against:
+                state.actions.append(
+                    {
+                        "bucket": bi,
+                        "action": "SKIP_FLIP",
+                        "reason": (
+                            f"no_adverse_move (entry={state.entry_ws_price:.2f}, "
+                            f"now={current_up:.2f}, need>={state.min_adverse_move:.2f})"
+                        ),
+                        "side": signal,
+                        "ts": now_ts,
+                    }
+                )
+                continue
+
+            # All gates passed — execute the flip
+            _, old_entry, old_size, old_cost = state.position
             old_current = current_up if old_side == "YES" else 1.0 - current_up
             proceeds = old_size * old_current * (1 - state.fee_pct)
             state.realized_pnl += proceeds - old_cost
             new_size = state.position_size_usd / our_entry_price
             new_cost = state.position_size_usd * (1 + state.fee_pct)
             state.position = (signal, our_entry_price, new_size, new_cost)
+            state.last_position_change_ts = now_ts
+            state.entry_ws_price = current_up
             state.actions.append(
                 {
                     "bucket": bi,
@@ -400,6 +479,10 @@ async def trade_one_market(
     confusion_detector: ConfusionDetector,
     min_signal_strength: int = 7,
     min_seconds_remaining: int = 180,
+    max_bucket_age_sec: int = 30,
+    min_flip_strength: int = 9,
+    flip_cooldown_sec: int = 60,
+    min_adverse_move: float = 0.15,
 ) -> dict:
     """Trade one market with WebSocket-driven polling."""
     slug_ts = market_info["_slug_ts"]
@@ -421,6 +504,10 @@ async def trade_one_market(
         smart_wallets=smart_wallets,
         min_signal_strength=min_signal_strength,
         min_seconds_remaining=min_seconds_remaining,
+        max_bucket_age_sec=max_bucket_age_sec,
+        min_flip_strength=min_flip_strength,
+        flip_cooldown_sec=flip_cooldown_sec,
+        min_adverse_move=min_adverse_move,
     )
 
     # Check confusion detector
@@ -600,7 +687,55 @@ async def main():
         default=0,
         help="Stop after N markets traded (0 = unlimited, use --duration-min only)",
     )
+    parser.add_argument(
+        "--max-bucket-age-sec",
+        type=int,
+        default=30,
+        help=(
+            "Staleness gate: skip buckets whose end was >N seconds ago. "
+            "Prevents the bot from replaying a bucket-2 signal minutes later "
+            "at a materially worse price when it joins the market late."
+        ),
+    )
+    parser.add_argument(
+        "--min-flip-strength",
+        type=int,
+        default=0,
+        help=(
+            "Distinct wallets required to FLIP an existing position "
+            "(0 = auto, uses min_signal_strength + 2). Flips are expensive "
+            "(4%% round-trip fee) so they should demand stronger consensus "
+            "than the initial entry."
+        ),
+    )
+    parser.add_argument(
+        "--flip-cooldown-sec",
+        type=int,
+        default=60,
+        help="Reject flips within N seconds of the last entry/flip",
+    )
+    parser.add_argument(
+        "--min-adverse-move",
+        type=float,
+        default=0.15,
+        help=(
+            "WS mid must have moved at least this much AGAINST the current "
+            "position before a flip is allowed. Prevents flipping on pure "
+            "wallet-consensus noise when the market isn't disagreeing with us."
+        ),
+    )
+    parser.add_argument(
+        "--no-flips",
+        action="store_true",
+        help="Disable flips entirely (equivalent to --min-flip-strength 999)",
+    )
     args = parser.parse_args()
+
+    # Resolve --no-flips and auto-default for min-flip-strength
+    if args.no_flips:
+        args.min_flip_strength = 999
+    elif args.min_flip_strength == 0:
+        args.min_flip_strength = args.min_signal_strength + 2
 
     print("=" * 90)
     print("  LIVE TRADING BOT — WebSocket-First (Config N — quality-first)")
@@ -610,6 +745,14 @@ async def main():
         print(f"  Max cycles:   {args.max_cycles} markets")
     print(f"  Min strength: {args.min_signal_strength} distinct wallets")
     print(f"  Time gate:    >= {args.min_seconds_remaining}s remaining")
+    print(f"  Staleness:    skip buckets > {args.max_bucket_age_sec}s old")
+    if args.no_flips:
+        print(f"  Flips:        DISABLED")
+    else:
+        print(
+            f"  Flip gates:   strength>={args.min_flip_strength}, "
+            f"cooldown>={args.flip_cooldown_sec}s, adverse>={args.min_adverse_move:.2f}"
+        )
     print(f"  Mode:         PAPER (no real money)")
     print(f"  Polling:      {BASELINE_POLL_INTERVAL}s baseline + burst-triggered HTTP")
     print(f"  Burst thresh: {BURST_TRADE_THRESHOLD} trades in {BURST_LOOKBACK_SEC}s")
@@ -660,6 +803,10 @@ async def main():
                 confusion,
                 min_signal_strength=args.min_signal_strength,
                 min_seconds_remaining=args.min_seconds_remaining,
+                max_bucket_age_sec=args.max_bucket_age_sec,
+                min_flip_strength=args.min_flip_strength,
+                flip_cooldown_sec=args.flip_cooldown_sec,
+                min_adverse_move=args.min_adverse_move,
             )
             results.append(result)
 
@@ -667,11 +814,17 @@ async def main():
                 print(f"\n  Reached max cycles ({args.max_cycles}) — exiting loop.", flush=True)
                 break
 
-        # Retroactive resolution
+        # Retroactive resolution — Chainlink oracle typically publishes the
+        # resolution 1-3 min after market close. The initial 30s wait was too
+        # short; many markets ended the 10-cycle live test still "unresolved"
+        # and the bot's reported P&L omitted settlement credits entirely.
+        # New budget: 60s initial + 12 × 15s retries ≈ 4 minutes total per
+        # unresolved market. Still bounded so a truly-stuck market doesn't
+        # deadlock the session summary.
         print("\n" + "=" * 90)
-        print("  FETCHING FINAL RESOLUTIONS (waiting 30s for UMA)...")
+        print("  FETCHING FINAL RESOLUTIONS (waiting 60s for Chainlink)...", flush=True)
         print("=" * 90)
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
 
         for r in results:
             if r.get("action") in ("PAUSED", "NO_TOKENS"):
@@ -681,7 +834,7 @@ async def main():
             slug = r.get("slug", "")
             if not slug:
                 continue
-            for retry in range(5):
+            for retry in range(12):
                 try:
                     data = await gamma.get("/events", {"slug": slug})
                     if isinstance(data, list) and data:
@@ -698,7 +851,7 @@ async def main():
                             break
                 except Exception:
                     pass
-                await asyncio.sleep(10)
+                await asyncio.sleep(15)
 
         # Summary
         print("\n" + "=" * 90)
