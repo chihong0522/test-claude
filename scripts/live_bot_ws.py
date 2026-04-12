@@ -125,7 +125,7 @@ class MarketTradingState:
     stop_loss_threshold: float = 0.25  # sell when our side price drops -N since entry
     stop_loss_min_remaining: int = 60  # only stop-loss if this much time is still left
     late_window_sec: int = 30  # "late" means this many seconds before market close
-    late_window_min_price: float = 0.70  # in late window, sell if our side price < N
+    late_window_min_price: float = 0.85  # in late window, sell if our side price < N
 
     # WebSocket event tracking
     ws_trade_events: deque = field(default_factory=lambda: deque(maxlen=500))
@@ -593,7 +593,7 @@ async def trade_one_market(
     stop_loss_threshold: float = 0.25,
     stop_loss_min_remaining: int = 60,
     late_window_sec: int = 30,
-    late_window_min_price: float = 0.70,
+    late_window_min_price: float = 0.85,
 ) -> dict:
     """Trade one market with WebSocket-driven polling."""
     slug_ts = market_info["_slug_ts"]
@@ -914,10 +914,12 @@ async def main():
     parser.add_argument(
         "--late-window-min-price",
         type=float,
-        default=0.70,
+        default=0.85,
         help=(
             "In the late window, sell if our side's price is below this threshold. "
-            "Kills near-close reversals on uncleared positions."
+            "Aggressive default (0.85): force-sell any position that hasn't clearly "
+            "cleared in our favor before market close, to eliminate last-second "
+            "reversal risk. Conservative value 0.70 leaves moderate winners exposed."
         ),
     )
     parser.add_argument(
