@@ -109,8 +109,24 @@ class MarketTradingState:
     signal_dominance: float = 2.0
     min_seconds_remaining: int = 180  # time gate: only fire with >= 3 min left
     max_bucket_age_sec: int = 30  # staleness gate: skip buckets older than this when we poll them
-    position_size_usd: float = 60.0
+    position_size_usd: float = 60.0  # BASE stake; see differential sizing below
     fee_pct: float = 0.02
+
+    # Differential position sizing based on entry price.
+    # Rationale: at very low entry prices (e.g. buying a contract at $0.15),
+    # the win:loss ratio is 5.67:1 — a 40% accuracy signal is profitable.
+    # At high entry prices (e.g. $0.70), the ratio is 0.43:1 — we need ~70%
+    # accuracy just to break even. Sizing larger in the favorable zone and
+    # smaller (or not at all) in the unfavorable zone lifts expected value
+    # without changing the signal logic itself.
+    sizing_mode: str = "differential"  # "differential" or "fixed"
+    sizing_very_low_mult: float = 1.5   # entry <= sizing_very_low_max (juicy asymmetry)
+    sizing_normal_mult: float = 1.0     # entry in (very_low_max, normal_max]
+    sizing_moderate_mult: float = 0.5   # entry in (normal_max, moderate_max]
+    sizing_expensive_mult: float = 0.25  # entry > moderate_max (poor asymmetry)
+    sizing_very_low_max: float = 0.20
+    sizing_normal_max: float = 0.40
+    sizing_moderate_max: float = 0.60
 
     # Flip-specific gates (all must pass to flip an existing position)
     min_flip_strength: int = 5  # stricter wallet count for flips (default = min_signal_strength + 2)
@@ -232,6 +248,24 @@ async def poll_http_trades(
     if triggered_by_burst:
         state.burst_triggered_polls += 1
     return new_count
+
+
+def compute_stake(state: MarketTradingState, entry_price: float) -> tuple[float, str]:
+    """Return (stake_usd, tier_label) for the given entry price.
+
+    Differential sizing puts more capital behind favorable-asymmetry entries
+    (low entry price) and less behind unfavorable-asymmetry entries. In
+    `fixed` mode, always returns (position_size_usd, "fixed").
+    """
+    if state.sizing_mode != "differential":
+        return state.position_size_usd, "fixed"
+    if entry_price <= state.sizing_very_low_max:
+        return state.position_size_usd * state.sizing_very_low_mult, "very_low"
+    if entry_price <= state.sizing_normal_max:
+        return state.position_size_usd * state.sizing_normal_mult, "normal"
+    if entry_price <= state.sizing_moderate_max:
+        return state.position_size_usd * state.sizing_moderate_mult, "moderate"
+    return state.position_size_usd * state.sizing_expensive_mult, "expensive"
 
 
 def check_exit_signal(state: MarketTradingState, now_ts: int) -> str | None:
@@ -405,8 +439,9 @@ def process_voting(state: MarketTradingState, now_ts: int):
             continue
 
         if state.position is None:
-            size = state.position_size_usd / our_entry_price
-            cost = state.position_size_usd * (1 + state.fee_pct)
+            stake_usd, tier = compute_stake(state, our_entry_price)
+            size = stake_usd / our_entry_price
+            cost = stake_usd * (1 + state.fee_pct)
             state.position = (signal, our_entry_price, size, cost)
             state.last_position_change_ts = now_ts
             state.entry_ws_price = current_up
@@ -419,6 +454,8 @@ def process_voting(state: MarketTradingState, now_ts: int):
                     "yes_wallets": yes_count,
                     "no_wallets": no_count,
                     "remaining_s": seconds_remaining,
+                    "stake_usd": round(stake_usd, 2),
+                    "sizing_tier": tier,
                     "ts": now_ts,
                 }
             )
@@ -475,8 +512,9 @@ def process_voting(state: MarketTradingState, now_ts: int):
             old_current = current_up if old_side == "YES" else 1.0 - current_up
             proceeds = old_size * old_current * (1 - state.fee_pct)
             state.realized_pnl += proceeds - old_cost
-            new_size = state.position_size_usd / our_entry_price
-            new_cost = state.position_size_usd * (1 + state.fee_pct)
+            stake_usd, tier = compute_stake(state, our_entry_price)
+            new_size = stake_usd / our_entry_price
+            new_cost = stake_usd * (1 + state.fee_pct)
             state.position = (signal, our_entry_price, new_size, new_cost)
             state.last_position_change_ts = now_ts
             state.entry_ws_price = current_up
@@ -489,6 +527,8 @@ def process_voting(state: MarketTradingState, now_ts: int):
                     "yes_wallets": yes_count,
                     "no_wallets": no_count,
                     "remaining_s": seconds_remaining,
+                    "stake_usd": round(stake_usd, 2),
+                    "sizing_tier": tier,
                     "ts": now_ts,
                 }
             )
@@ -594,6 +634,8 @@ async def trade_one_market(
     stop_loss_min_remaining: int = 60,
     late_window_sec: int = 30,
     late_window_min_price: float = 0.85,
+    sizing_mode: str = "differential",
+    position_size_usd: float = 60.0,
 ) -> dict:
     """Trade one market with WebSocket-driven polling."""
     slug_ts = market_info["_slug_ts"]
@@ -625,6 +667,8 @@ async def trade_one_market(
         stop_loss_min_remaining=stop_loss_min_remaining,
         late_window_sec=late_window_sec,
         late_window_min_price=late_window_min_price,
+        sizing_mode=sizing_mode,
+        position_size_usd=position_size_usd,
     )
 
     # Check confusion detector
@@ -752,10 +796,13 @@ async def trade_one_market(
         side = a.get("side", "-")
         price = a.get("price", 0.0)
         if action in ("ENTER", "FLIP"):
+            stake = a.get("stake_usd")
+            tier = a.get("sizing_tier")
+            stake_str = f", stake=${stake} [{tier}]" if stake is not None else ""
             print(
                 f"    b{a['bucket']:3d}: {action:9s} {side} @ {price}  "
                 f"(wallets {a.get('yes_wallets', 0)}Y/{a.get('no_wallets', 0)}N, "
-                f"remaining {a.get('remaining_s', 0)}s)"
+                f"remaining {a.get('remaining_s', 0)}s{stake_str})"
             )
         elif action == "EXIT":
             print(
@@ -927,6 +974,22 @@ async def main():
         action="store_true",
         help="Disable profit-take / stop-loss / late-window exits (hold to resolution)",
     )
+    parser.add_argument(
+        "--sizing-mode",
+        choices=["differential", "fixed"],
+        default="differential",
+        help=(
+            "Position sizing: 'differential' scales stake by entry price tier "
+            "(1.5x at <=0.20, 1.0x at 0.20-0.40, 0.5x at 0.40-0.60, 0.25x above); "
+            "'fixed' uses --position-size for every trade regardless of entry."
+        ),
+    )
+    parser.add_argument(
+        "--position-size",
+        type=float,
+        default=60.0,
+        help="Base stake in USD (scaled by --sizing-mode tier multipliers)",
+    )
     args = parser.parse_args()
 
     # Resolve --no-flips and auto-default for min-flip-strength
@@ -959,6 +1022,13 @@ async def main():
             f"stop<=-{args.stop_loss:.2f} (if >={args.stop_loss_min_remaining}s left), "
             f"late<{args.late_window_min_price:.2f} (<{args.late_window_sec}s left)"
         )
+    if args.sizing_mode == "differential":
+        print(
+            f"  Sizing:       differential base=${args.position_size:.0f} "
+            f"(1.5x<=0.20, 1.0x 0.20-0.40, 0.5x 0.40-0.60, 0.25x>0.60)"
+        )
+    else:
+        print(f"  Sizing:       fixed ${args.position_size:.0f} per trade")
     print(f"  Mode:         PAPER (no real money)")
     print(f"  Polling:      {BASELINE_POLL_INTERVAL}s baseline + burst-triggered HTTP")
     print(f"  Burst thresh: {BURST_TRADE_THRESHOLD} trades in {BURST_LOOKBACK_SEC}s")
@@ -1019,6 +1089,8 @@ async def main():
                 stop_loss_min_remaining=args.stop_loss_min_remaining,
                 late_window_sec=args.late_window_sec,
                 late_window_min_price=args.late_window_min_price,
+                sizing_mode=args.sizing_mode,
+                position_size_usd=args.position_size,
             )
             results.append(result)
 
