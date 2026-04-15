@@ -54,7 +54,21 @@ BURST_LOOKBACK_SEC = 2.0  # how far back to count recent trades
 MAIN_LOOP_INTERVAL = 0.2  # 200ms main loop tick
 
 
-def load_smart_wallets() -> set[str]:
+def load_smart_wallets() -> dict[str, float]:
+    """Load the v2 quality pool and compute a per-wallet VOTE WEIGHT.
+
+    Weight tiers (based on OOS signal-time accuracy, which is the most
+    conservative measure — held-out performance on markets the wallet
+    selection pipeline never saw):
+      - OOS >= 0.80  → weight 2.0  (proven strong predictors)
+      - OOS 0.60-0.80 → weight 1.0  (solid)
+      - OOS < 0.60   → weight 0.5  (barely above 52% selection floor)
+
+    Wallets with < 5 OOS participations (insufficient evidence) default
+    to weight 1.0 rather than being down-weighted — we don't want to
+    penalize a good train-set wallet just because its validate window
+    happened to be quiet.
+    """
     if not SMART_WALLETS_FILE.exists():
         raise RuntimeError(
             f"Smart wallets file not found: {SMART_WALLETS_FILE}\n"
@@ -64,15 +78,37 @@ def load_smart_wallets() -> set[str]:
         data = json.load(f)
     refreshed = data.get("refreshed_at", "unknown")
     version = data.get("version", 1)
-    wallets = {w["wallet"] for w in data.get("wallets", [])}
-    print(f"Loaded {len(wallets)} smart wallets (v{version}, refreshed {refreshed[:19]})")
+
+    weights: dict[str, float] = {}
+    tier_counts = {"2.0x": 0, "1.0x": 0, "0.5x": 0}
+    for w in data.get("wallets", []):
+        wallet = w["wallet"]
+        oos_n = w.get("oos_participations", 0)
+        oos_acc = w.get("oos_accuracy", 0.0)
+        train_acc = w.get("signal_time_accuracy", 0.0)
+        # Use OOS accuracy if we have enough samples, otherwise fall back to train
+        acc = oos_acc if oos_n >= 5 else train_acc
+        if acc >= 0.80:
+            weights[wallet] = 2.0
+            tier_counts["2.0x"] += 1
+        elif acc < 0.60:
+            weights[wallet] = 0.5
+            tier_counts["0.5x"] += 1
+        else:
+            weights[wallet] = 1.0
+            tier_counts["1.0x"] += 1
+
+    print(
+        f"Loaded {len(weights)} smart wallets (v{version}, refreshed {refreshed[:19]}) "
+        f"— tiers: {tier_counts['2.0x']}×2.0, {tier_counts['1.0x']}×1.0, {tier_counts['0.5x']}×0.5"
+    )
     if version < 2:
         print(
             "  WARNING: wallet pool is v1 (legacy PnL-only selection). "
             "Strongly recommend: python scripts/refresh_smart_wallets.py "
             "to regenerate with signal-time accuracy + OOS validation."
         )
-    return wallets
+    return weights
 
 
 def _fmt_ts(ts: int | None) -> str:
@@ -102,7 +138,8 @@ class MarketTradingState:
     down_token_id: str
     start_ts: int
     end_ts: int
-    smart_wallets: set[str]
+    smart_wallets: set[str]  # pool membership (for fast `in` checks)
+    smart_wallet_weights: dict[str, float] = field(default_factory=dict)  # wallet -> vote weight
 
     # Strategy params (Config N — quality-first)
     min_signal_strength: int = 7  # distinct wallets (not raw votes)
@@ -149,6 +186,20 @@ class MarketTradingState:
     ws_latest_up_price: float = 0.5  # updated real-time from WS
     last_burst_trigger_ts: float = 0.0
 
+    # Latest full orderbook snapshots per token (updated on `book` events).
+    # Each list is (price, size), bids high-to-low, asks low-to-high.
+    up_book_bids: list[tuple[float, float]] = field(default_factory=list)
+    up_book_asks: list[tuple[float, float]] = field(default_factory=list)
+    down_book_bids: list[tuple[float, float]] = field(default_factory=list)
+    down_book_asks: list[tuple[float, float]] = field(default_factory=list)
+
+    # Orderbook depth confirmation: before entering we require at least
+    # min_book_depth_usd of resting ASK size within book_depth_window of
+    # best ask on our side. Thin books gap hard on smart-wallet buys —
+    # our Run-5 Cycle 7 and Run-6 Cycle 9 both cratered this way.
+    min_book_depth_usd: float = 150.0
+    book_depth_window: float = 0.05  # cents band above best ask to consider
+
     # HTTP state
     seen_tx_hashes: set[str] = field(default_factory=set)
     http_trades: list[dict] = field(default_factory=list)
@@ -190,6 +241,15 @@ def update_ws_price(state: MarketTradingState, ev: WSEvent):
                 state.ws_latest_up_price = mid
             elif ev.asset_id == state.down_token_id:
                 state.ws_latest_up_price = 1.0 - mid
+        # Capture full depth so process_voting can assess liquidity
+        # before firing an entry (see check_book_depth_ok).
+        if ev.bid_levels is not None and ev.ask_levels is not None:
+            if ev.asset_id == state.up_token_id:
+                state.up_book_bids = ev.bid_levels
+                state.up_book_asks = ev.ask_levels
+            elif ev.asset_id == state.down_token_id:
+                state.down_book_bids = ev.bid_levels
+                state.down_book_asks = ev.ask_levels
     elif ev.event_type == "best_bid_ask":
         if ev.best_bid > 0 and ev.best_ask > 0:
             mid = (ev.best_bid + ev.best_ask) / 2
@@ -248,6 +308,41 @@ async def poll_http_trades(
     if triggered_by_burst:
         state.burst_triggered_polls += 1
     return new_count
+
+
+def check_book_depth_ok(state: MarketTradingState, signal: str) -> tuple[bool, str]:
+    """Inspect the latest orderbook snapshot for the side we want to buy.
+    Returns (ok, reason). `ok=False` means the book is too thin to safely
+    enter — reject the signal to avoid the gap-fill failure mode we saw
+    in Run-5 Cycle 7 (price 0.31 → 0.01 in 20s) and Run-6 Cycle 9
+    (0.50 → 0.01 in 30s): both had a smart-wallet buy signal into a
+    near-empty ask side.
+
+    We check the ask side of the token we'd buy (YES → up_token_asks,
+    NO → down_token_asks). If total USD notional within
+    book_depth_window of best ask is below min_book_depth_usd, the market
+    is too thin — one market order will walk the book way up.
+
+    If we have no book data yet (bot just connected), allow entry by
+    default (don't stall trading on a slow first book event).
+    """
+    asks = state.up_book_asks if signal == "YES" else state.down_book_asks
+    if not asks:
+        return True, "no_book_yet"
+    best_ask = asks[0][0]
+    if best_ask <= 0:
+        return True, "no_ask"
+    cap = best_ask + state.book_depth_window
+    # Sum notional (USD) of asks within the depth window.
+    # On Polymarket, size is in shares; USD = shares * price.
+    total_usd = 0.0
+    for price, size in asks:
+        if price > cap:
+            break
+        total_usd += price * size
+    if total_usd < state.min_book_depth_usd:
+        return False, f"thin_book ${total_usd:.0f}<${state.min_book_depth_usd:.0f}"
+    return True, f"ok ${total_usd:.0f}"
 
 
 def compute_stake(state: MarketTradingState, entry_price: float) -> tuple[float, str]:
@@ -414,18 +509,24 @@ def process_voting(state: MarketTradingState, now_ts: int):
         ]
         yes_wallets = {t.get("proxyWallet") for t in yes_trades if t.get("proxyWallet")}
         no_wallets = {t.get("proxyWallet") for t in no_trades if t.get("proxyWallet")}
-        yes_count = len(yes_wallets)
-        no_count = len(no_wallets)
+        # WEIGHTED voting: each distinct wallet contributes its per-wallet
+        # weight (2.0 / 1.0 / 0.5 based on OOS accuracy). Falls back to 1.0
+        # for any wallet missing from the weights dict (defensive default).
+        # `yes_count` / `no_count` now represent "weighted vote strength",
+        # not raw distinct-wallet counts. The min_signal_strength and
+        # signal_dominance thresholds operate on the weighted sums.
+        yes_count = sum(state.smart_wallet_weights.get(w, 1.0) for w in yes_wallets)
+        no_count = sum(state.smart_wallet_weights.get(w, 1.0) for w in no_wallets)
 
         signal = None
         if (
             yes_count >= state.min_signal_strength
-            and yes_count >= state.signal_dominance * max(no_count, 1)
+            and yes_count >= state.signal_dominance * max(no_count, 1.0)
         ):
             signal = "YES"
         elif (
             no_count >= state.min_signal_strength
-            and no_count >= state.signal_dominance * max(yes_count, 1)
+            and no_count >= state.signal_dominance * max(yes_count, 1.0)
         ):
             signal = "NO"
 
@@ -436,6 +537,24 @@ def process_voting(state: MarketTradingState, now_ts: int):
         current_up = state.ws_latest_up_price
         our_entry_price = current_up if signal == "YES" else 1.0 - current_up
         if our_entry_price < 0.05 or our_entry_price > 0.95:
+            continue
+
+        # Orderbook depth gate — reject if the ask side we'd buy into is
+        # too thin to absorb our order without walking the book. Applied
+        # to both ENTER and FLIP (flipping also requires buying the new side).
+        book_ok, book_reason = check_book_depth_ok(state, signal)
+        if not book_ok:
+            state.actions.append(
+                {
+                    "bucket": bi,
+                    "action": "SKIP_DEPTH",
+                    "side": signal,
+                    "reason": book_reason,
+                    "yes_wallets": round(yes_count, 1),
+                    "no_wallets": round(no_count, 1),
+                    "ts": now_ts,
+                }
+            )
             continue
 
         if state.position is None:
@@ -451,8 +570,8 @@ def process_voting(state: MarketTradingState, now_ts: int):
                     "action": "ENTER",
                     "side": signal,
                     "price": round(our_entry_price, 4),
-                    "yes_wallets": yes_count,
-                    "no_wallets": no_count,
+                    "yes_wallets": round(yes_count, 1),
+                    "no_wallets": round(no_count, 1),
                     "remaining_s": seconds_remaining,
                     "stake_usd": round(stake_usd, 2),
                     "sizing_tier": tier,
@@ -524,8 +643,8 @@ def process_voting(state: MarketTradingState, now_ts: int):
                     "action": "FLIP",
                     "side": signal,
                     "price": round(our_entry_price, 4),
-                    "yes_wallets": yes_count,
-                    "no_wallets": no_count,
+                    "yes_wallets": round(yes_count, 1),
+                    "no_wallets": round(no_count, 1),
                     "remaining_s": seconds_remaining,
                     "stake_usd": round(stake_usd, 2),
                     "sizing_tier": tier,
@@ -621,6 +740,7 @@ async def trade_one_market(
     ws: MarketWebSocketClient,
     market_info: dict,
     smart_wallets: set[str],
+    smart_wallet_weights: dict[str, float],
     confusion_detector: ConfusionDetector,
     min_signal_strength: int = 7,
     min_seconds_remaining: int = 180,
@@ -636,6 +756,8 @@ async def trade_one_market(
     late_window_min_price: float = 0.85,
     sizing_mode: str = "differential",
     position_size_usd: float = 60.0,
+    min_book_depth_usd: float = 150.0,
+    book_depth_window: float = 0.05,
 ) -> dict:
     """Trade one market with WebSocket-driven polling."""
     slug_ts = market_info["_slug_ts"]
@@ -655,6 +777,7 @@ async def trade_one_market(
         start_ts=slug_ts,
         end_ts=slug_ts + FIVE_MIN,
         smart_wallets=smart_wallets,
+        smart_wallet_weights=smart_wallet_weights,
         min_signal_strength=min_signal_strength,
         min_seconds_remaining=min_seconds_remaining,
         max_bucket_age_sec=max_bucket_age_sec,
@@ -669,6 +792,8 @@ async def trade_one_market(
         late_window_min_price=late_window_min_price,
         sizing_mode=sizing_mode,
         position_size_usd=position_size_usd,
+        min_book_depth_usd=min_book_depth_usd,
+        book_depth_window=book_depth_window,
     )
 
     # Check confusion detector
@@ -812,7 +937,12 @@ async def trade_one_market(
             )
         elif action == "SKIP_FLIP":
             print(
-                f"    b{a['bucket']:3d}: SKIP_FLIP {side} — {a.get('reason', '')}"
+                f"    b{a['bucket']:3d}: SKIP_FLIP  {side} — {a.get('reason', '')}"
+            )
+        elif action == "SKIP_DEPTH":
+            print(
+                f"    b{a['bucket']:3d}: SKIP_DEPTH {side} "
+                f"(votes {a.get('yes_wallets', 0)}Y/{a.get('no_wallets', 0)}N) — {a.get('reason', '')}"
             )
         else:
             print(f"    b{a['bucket']:3d}: {action}")
@@ -990,6 +1120,23 @@ async def main():
         default=60.0,
         help="Base stake in USD (scaled by --sizing-mode tier multipliers)",
     )
+    parser.add_argument(
+        "--min-book-depth",
+        type=float,
+        default=150.0,
+        help=(
+            "Minimum USD notional of resting ASK size (within "
+            "--book-depth-window of best ask) required on our side before "
+            "we'll enter. Thin-book entries gap-fill catastrophically "
+            "(see Run-5 C7 / Run-6 C9). Set 0 to disable the gate."
+        ),
+    )
+    parser.add_argument(
+        "--book-depth-window",
+        type=float,
+        default=0.05,
+        help="Ask-price band (cents above best ask) to sum for --min-book-depth",
+    )
     args = parser.parse_args()
 
     # Resolve --no-flips and auto-default for min-flip-strength
@@ -1029,6 +1176,14 @@ async def main():
         )
     else:
         print(f"  Sizing:       fixed ${args.position_size:.0f} per trade")
+    if args.min_book_depth > 0:
+        print(
+            f"  Book gate:    require >=${args.min_book_depth:.0f} ask-depth "
+            f"within {args.book_depth_window:.2f} of best ask on our side"
+        )
+    else:
+        print(f"  Book gate:    DISABLED")
+    print(f"  Voting:       weighted (2.0x OOS>=80%, 1.0x 60-80%, 0.5x <60%)")
     print(f"  Mode:         PAPER (no real money)")
     print(f"  Polling:      {BASELINE_POLL_INTERVAL}s baseline + burst-triggered HTTP")
     print(f"  Burst thresh: {BURST_TRADE_THRESHOLD} trades in {BURST_LOOKBACK_SEC}s")
@@ -1036,7 +1191,8 @@ async def main():
     print("=" * 90)
 
     print("\n[1/3] Loading smart wallets...")
-    smart_wallets = load_smart_wallets()
+    smart_wallet_weights = load_smart_wallets()
+    smart_wallets = set(smart_wallet_weights.keys())
 
     print("\n[2/3] Initializing confusion detector...")
     confusion = ConfusionDetector(window=20, pause_threshold=70.0, pause_duration=5)
@@ -1076,6 +1232,7 @@ async def main():
                 ws,
                 market,
                 smart_wallets,
+                smart_wallet_weights,
                 confusion,
                 min_signal_strength=args.min_signal_strength,
                 min_seconds_remaining=args.min_seconds_remaining,
@@ -1091,6 +1248,8 @@ async def main():
                 late_window_min_price=args.late_window_min_price,
                 sizing_mode=args.sizing_mode,
                 position_size_usd=args.position_size,
+                min_book_depth_usd=args.min_book_depth,
+                book_depth_window=args.book_depth_window,
             )
             results.append(result)
 

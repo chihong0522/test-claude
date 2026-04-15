@@ -43,9 +43,14 @@ class WSEvent:
     size: float = 0.0
     side: str = ""  # BUY or SELL
     timestamp: int = 0
-    # Populated for 'book' events
+    # Populated for 'book' and 'best_bid_ask' events
     best_bid: float = 0.0
     best_ask: float = 0.0
+    # Populated for 'book' events only — full depth so downstream can
+    # assess liquidity (not just mid-price). Each level is (price, size).
+    # bid_levels is sorted high-to-low, ask_levels low-to-high.
+    bid_levels: list[tuple[float, float]] = None  # type: ignore[assignment]
+    ask_levels: list[tuple[float, float]] = None  # type: ignore[assignment]
 
 
 def _parse_event(data: dict) -> WSEvent | None:
@@ -73,10 +78,30 @@ def _parse_event(data: dict) -> WSEvent | None:
         bids = data.get("bids") or []
         asks = data.get("asks") or []
         try:
-            if bids:
-                ev.best_bid = max(float(b.get("price", 0)) for b in bids)
-            if asks:
-                ev.best_ask = min(float(a.get("price", 0)) for a in asks)
+            # Parse full depth into (price, size) tuples. Downstream callers
+            # can inspect the top N levels for liquidity confirmation.
+            parsed_bids: list[tuple[float, float]] = []
+            for b in bids:
+                try:
+                    parsed_bids.append((float(b.get("price", 0)), float(b.get("size", 0))))
+                except (TypeError, ValueError):
+                    continue
+            parsed_asks: list[tuple[float, float]] = []
+            for a in asks:
+                try:
+                    parsed_asks.append((float(a.get("price", 0)), float(a.get("size", 0))))
+                except (TypeError, ValueError):
+                    continue
+            # Polymarket returns bids ascending and asks ascending. Sort
+            # for canonical downstream consumption (best-first).
+            parsed_bids.sort(key=lambda x: x[0], reverse=True)  # high-to-low
+            parsed_asks.sort(key=lambda x: x[0])  # low-to-high
+            ev.bid_levels = parsed_bids
+            ev.ask_levels = parsed_asks
+            if parsed_bids:
+                ev.best_bid = parsed_bids[0][0]
+            if parsed_asks:
+                ev.best_ask = parsed_asks[0][0]
         except (TypeError, ValueError):
             pass
     elif event_type == "best_bid_ask":
