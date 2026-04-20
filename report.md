@@ -23,6 +23,72 @@ Five research agents ran in parallel. **Only Agent 1 (DeFi) had live web access*
 
 ---
 
+## Thesis & Reward Math — Top 5
+
+*Assumes ETH holds $3k-$5k range over the horizon (ETH beta priced in). "Reward" is on the token, not a portfolio. Math is directional — meant to show the path, not guarantee the print.*
+
+### 1. AAVE — Base +3-5x / Bull +8-10x
+**Why picked:**
+- Hard cashflow: $142M net revenue (2025, +57% YoY) on a $1.76B MC = P/S ~12x. Peer lending P/S averages 25-40x.
+- Mechanical buyer: $50M/yr **permanent** open-market buyback already live, retiring supply while the float is ~96% unlocked.
+- Catalyst stack in progress: V4 Hub-and-Spoke live (Mar 2026), "Aave Will Win" temp-check passed 52.6% (100% product revenue → DAO), sGHO live at 4.25%, SOC 2 just cleared.
+- Moat: ~50% lending market share, $36-50B deposits, $1T+ cumulative loans — institutional distribution is a real barrier.
+
+**Reward math:**
+- **Base case 3-5x** ($5-9B MC, $320-575 price): P/S re-rates from ~12x → 25-30x on continued buyback + revenue growth 25-40%. No binding "Aave Will Win" vote required.
+- **Bull case 8-10x** ($14-18B MC, $900-1,150 price): "Aave Will Win" passes on-chain → 100% revenue routed to token → effective P/S collapses to ~5-7x at current price → reflexive re-rate to 40-50x on a doubled revenue base.
+- **What must be true:** revenue grows ≥25%, buyback not cut, no V4 exploit, no Morpho/Fluid share-shock.
+
+### 2. UNI — Base +3x / Bull +10x
+**Why picked:**
+- Biggest tokenomics transition in DeFi: UNIfication passed 99.9% (125M UNI FOR). 100M UNI one-time burn executed (~16% of supply, ~$596M retired).
+- Ongoing fee-to-burn on v2/v3 LP fees + Unichain sequencer revenue routed to burn. L2 fee-switch expansion vote live with fees defaulting **ON** across 8 L2s.
+- Converts UNI from the textbook "value trap governance token" to a deflationary cashflow asset — this is the single largest narrative shift a DeFi blue-chip has ever made.
+- Uniswap still #1 DEX by volume; the burn scales with real usage.
+
+**Reward math:**
+- **Base +3x** ($6B MC, $9-10 price): First full post-switch quarter shows meaningful burn rate (1-2% of supply annualized). Re-rating as model shifts from "governance token" to "fee-bearing asset" comparable to ETHFI/SNX post-buyback.
+- **Bull +10x** ($20B MC, $30+ price): L2 expansion drives sequencer + fee revenue materially; burn compounds while v4 hooks + UniswapX capture new volume; narrative premium as the "deflationary DEX."
+- **What must be true:** fee-switch doesn't migrate meaningful liquidity to competitors (Curve, Aerodrome, Fluid), L2 volumes scale, burn rate is visible on-chain.
+
+### 3. PENDLE — Base +3-5x / Bull +8x
+**Why picked:**
+- Most capital-efficient token in the RWA/yield cluster: ~$140M rev on $1.9B MC (P/S ~15x), vePENDLE accrues 100% of swap + YT fees directly.
+- **Near-fully circulating** — the rarest trait in this cohort. No 2026-27 unlock cliff to fade into.
+- TAM expansion: Boros (perp-funding AMM) extends Pendle from $8B yield TVL into the ~$200B perp funding market. Completely orthogonal to RWA cycle.
+- Picks-and-shovels: every new yield primitive (sUSDe, sUSDS, syrupUSDC, LRTs, tokenized T-bills) becomes a Pendle market by default.
+
+**Reward math:**
+- **Base +3-5x** ($6-10B MC): Boros notional to $5-10B + continued RWA PT expansion → revenue doubles to ~$300M → P/S holds 20-25x.
+- **Bull +8x** ($15B+ MC): Pendle becomes the universal interest-rate layer; revenue to $600M+ at peak cycle; FDV re-rate to 15-20x of that.
+- **What must be true:** yield spreads don't compress to zero, Boros executes without liquidation crisis, LRT cohort doesn't fully roll off before RWA picks up the slack.
+
+### 4. MORPHO — Base +3-5x / Bull +8x
+**Why picked:**
+- Becoming the default credit rail for TradFi on-chain: Coinbase USDC lending, Societe Generale-Forge credit markets, most curator-run RWA collateral markets all sit on Morpho Blue/Vaults v2.
+- Picks-and-shovels for the RWA narrative — wins regardless of which RWA issuer (Ondo, Centrifuge, Maple, BUIDL) gains share.
+- $11B deposits, $5.5B active loans, $90M fees. Fee switch is live at vault level; **protocol-level switch is the pending catalyst**.
+- Lowest-drama execution story in the vertical — quiet, B2B, shipping.
+
+**Reward math:**
+- **Base +3-5x** ($6-10B MC): Deposits scale to $20-25B with continued TradFi integrations + protocol fee switch on → revenue ~$180M at 30x P/S.
+- **Bull +8x** ($18B MC): Becomes the "Stripe of on-chain credit"; deposits $30B+; fee switch on; RWA collateral crosses $5B; premium rails multiple.
+- **What must be true:** no major curator bad-debt event, Aave V4 doesn't reclaim share aggressively, governance activates protocol switch.
+
+### 5. ENS — Base +3-5x / Bull +7-10x
+**Why picked:**
+- Only L2/infra name with **real cashflow**: $50-80M/yr in registration/renewal revenue, almost entirely DAO-captured.
+- ~97% circulating, ~$900M treasury (ETH + USDC + ENS) provides a floor.
+- Namechain (ENS L2 on Linea/Consensys stack) live — subdomain issuance economics + L2 fee capture.
+- 2026 narrative tailwind: agent wallets and AI systems need identity primitives; ENS is the default ETH-native answer. Multiple ETF basket proposals include ENS.
+
+**Reward math:**
+- **Base +3-5x** ($3.5-6B MC): Registration revenue holds or modestly grows, Namechain subdomain economics show first real traction, fee-switch/buyback discussion resurfaces.
+- **Bull +7-10x** ($8-12B MC): Agent/AI wallet identity narrative catches fire; ENS becomes the default resolution layer for on-chain AI agents; Namechain L2 generates meaningful fee share; fee-switch passes.
+- **What must be true:** registration volume doesn't collapse, agent-identity narrative has a real breakout, Namechain avoids irrelevance vs L2 competition.
+
+---
+
 ## Second Tier / Higher-Beta (Score 7)
 
 | Token | Vertical | MC (~) | Thesis | Main Risk |
