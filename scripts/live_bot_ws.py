@@ -1024,11 +1024,13 @@ async def main():
     parser.add_argument(
         "--min-signal-strength",
         type=int,
-        default=4,
+        default=3,
         help=(
-            "Minimum DISTINCT wallets (not raw votes) to fire a signal. "
-            "Default 4 is tuned for the 15-wallet v2 quality pool; with a "
-            "legacy 50-wallet pool use 7."
+            "Minimum WEIGHTED vote sum (not raw distinct wallets) to fire a "
+            "signal. With the v2 pool's weight tiers (2.0x for OOS>=80%%, "
+            "1.0x for 60-80%%, 0.5x for <60%%), 3.0 is the data-validated "
+            "floor: 30-cycle tests showed 2.0 added losers while 4.0 blocks "
+            "profitable trades. Also requires 2x dominance over opposing side."
         ),
     )
     parser.add_argument(
@@ -1139,8 +1141,10 @@ async def main():
         default="differential",
         help=(
             "Position sizing: 'differential' scales stake by entry price tier "
-            "(1.5x at <=0.20, 1.0x at 0.20-0.40, 0.5x at 0.40-0.60, 0.25x above); "
-            "'fixed' uses --position-size for every trade regardless of entry."
+            "(1.5x at <=0.20, 1.0x at 0.20-0.40, 0.5x at 0.40-0.60, SKIP above); "
+            "'fixed' uses --position-size for every trade regardless of entry. "
+            "Expensive-tier rejection (>0.60) is data-backed: both expensive "
+            "entries in the 30-cycle test were losses."
         ),
     )
     parser.add_argument(
@@ -1201,7 +1205,7 @@ async def main():
     if args.sizing_mode == "differential":
         print(
             f"  Sizing:       differential base=${args.position_size:.0f} "
-            f"(1.5x<=0.20, 1.0x 0.20-0.40, 0.5x 0.40-0.60, 0.25x>0.60)"
+            f"(1.5x<=0.20, 1.0x 0.20-0.40, 0.5x 0.40-0.60, SKIP>0.60)"
         )
     else:
         print(f"  Sizing:       fixed ${args.position_size:.0f} per trade")
