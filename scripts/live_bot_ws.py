@@ -40,6 +40,16 @@ from polymarket.clients.data_api import DataAPIClient
 from polymarket.clients.gamma import GammaClient
 from polymarket.collector.btc_5min_discovery import _extract_market_info
 
+# Live-trading imports (gracefully degrade if deps missing)
+_LIVE_TRADING_AVAILABLE = False
+try:
+    from polymarket.clients.clob_order_client import ClobOrderClient
+    from polymarket.trading.position_store import LivePosition, PositionStore
+    from polymarket.trading.risk_manager import RiskLimits, RiskManager
+    _LIVE_TRADING_AVAILABLE = True
+except ImportError:
+    pass
+
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -778,6 +788,10 @@ async def trade_one_market(
     position_size_usd: float = 60.0,
     min_book_depth_usd: float = 150.0,
     book_depth_window: float = 0.05,
+    trading_mode: str = "paper",
+    clob_client: object | None = None,
+    position_store: object | None = None,
+    risk_manager: object | None = None,
 ) -> dict:
     """Trade one market with WebSocket-driven polling."""
     slug_ts = market_info["_slug_ts"]
@@ -881,11 +895,67 @@ async def trade_one_market(
                 trigger_reason = "baseline"
 
             if should_poll:
+                prev_position = state.position
                 new_trades = await poll_http_trades(
                     data_api, state, triggered_by_burst=(trigger_reason == "BURST")
                 )
                 if new_trades > 0 or trigger_reason == "BURST":
                     process_voting(state, now_int)
+
+                # Live-execution hook: if process_voting just opened a position
+                # (prev was None, now is not None), submit a real order
+                if trading_mode != "paper" and prev_position is None and state.position is not None:
+                    side, entry_p, size, cost = state.position
+                    token_id = state.up_token_id if side == "YES" else state.down_token_id
+                    if trading_mode == "dry-run":
+                        print(
+                            f"    [DRY-RUN] WOULD BUY {side} token {token_id[:12]}... "
+                            f"@ {entry_p:.4f} size={size:.2f} cost=${cost:.2f}",
+                            flush=True,
+                        )
+                    elif clob_client is not None:
+                        # Pre-trade risk check
+                        stake_usd = cost / 1.02  # reverse fee to get stake
+                        balance = await clob_client.get_usdc_balance()
+                        if risk_manager:
+                            ok, reason = risk_manager.pre_trade_check(
+                                daily_pnl=position_store.get_daily_pnl() if position_store else 0,
+                                session_pnl=position_store.get_session_pnl() if position_store else 0,
+                                balance_usd=balance,
+                                stake_usd=stake_usd,
+                                open_positions=1 if state.position else 0,
+                            )
+                            if not ok:
+                                print(f"    [RISK BLOCKED] {reason}", flush=True)
+                                state.position = None  # revert paper position
+                                continue
+                        order = await clob_client.place_market_buy(
+                            token_id=token_id,
+                            amount_usd=stake_usd,
+                            price=entry_p,
+                        )
+                        fill = await clob_client.wait_for_fill(order.order_id, timeout_sec=10)
+                        print(
+                            f"    [LIVE] ORDER {fill.status}: {side} {token_id[:12]}... "
+                            f"@ {entry_p:.4f} id={order.order_id[:16]}",
+                            flush=True,
+                        )
+                        if position_store:
+                            position_store.record_entry(LivePosition(
+                                market_slug=state.slug,
+                                condition_id=state.condition_id,
+                                token_id=token_id,
+                                side=side,
+                                entry_price=entry_p,
+                                size=size,
+                                cost_usd=cost,
+                                order_id=order.order_id,
+                                order_status=fill.status,
+                                entered_at=datetime.utcnow().isoformat() + "Z",
+                                sizing_tier=state.actions[-1].get("sizing_tier", "") if state.actions else "",
+                            ))
+                        if risk_manager:
+                            risk_manager.record_trade()
 
             # Exit-signal check runs every main-loop tick (200ms), not only on
             # HTTP polls, so profit-take / stop-loss can fire on pure WS price
@@ -893,12 +963,41 @@ async def trade_one_market(
             if state.position is not None and not state.exited:
                 reason = check_exit_signal(state, now_int)
                 if reason is not None:
+                    side_before = state.position[0]
+                    size_before = state.position[2]
+                    exit_price = state.ws_latest_up_price if side_before == "YES" else 1 - state.ws_latest_up_price
                     print(
-                        f"    [{_fmt_ts(now_int)}] EXIT {state.position[0]} "
-                        f"@ {(state.ws_latest_up_price if state.position[0] == 'YES' else 1 - state.ws_latest_up_price):.3f} — {reason}",
+                        f"    [{_fmt_ts(now_int)}] EXIT {side_before} "
+                        f"@ {exit_price:.3f} — {reason}",
                         flush=True,
                     )
+
+                    # Live exit: submit sell order
+                    if trading_mode == "dry-run":
+                        token_id = state.up_token_id if side_before == "YES" else state.down_token_id
+                        print(
+                            f"    [DRY-RUN] WOULD SELL {side_before} token {token_id[:12]}... "
+                            f"@ {exit_price:.4f} size={size_before:.2f}",
+                            flush=True,
+                        )
+                    elif trading_mode == "live" and clob_client is not None:
+                        token_id = state.up_token_id if side_before == "YES" else state.down_token_id
+                        order = await clob_client.place_market_sell(
+                            token_id=token_id,
+                            size=size_before,
+                            price=exit_price,
+                        )
+                        fill = await clob_client.wait_for_fill(order.order_id, timeout_sec=10)
+                        print(
+                            f"    [LIVE] SELL {fill.status}: id={order.order_id[:16]}",
+                            flush=True,
+                        )
+
                     execute_exit(state, now_int, reason)
+
+                    if position_store and state.exited:
+                        pnl = state.realized_pnl
+                        position_store.record_exit(pnl, reason)
 
             # Print status every 10 seconds
             if now_int - last_status_print >= 10:
@@ -1170,6 +1269,22 @@ async def main():
         default=0.05,
         help="Ask-price band (cents above best ask) to sum for --min-book-depth",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["paper", "live", "dry-run"],
+        default="paper",
+        help=(
+            "Trading mode: 'paper' = simulated fills (no real money), "
+            "'live' = real order submission via CLOB API (requires .env credentials), "
+            "'dry-run' = same as live but prints 'WOULD PLACE' without submitting"
+        ),
+    )
+    parser.add_argument(
+        "--max-daily-loss",
+        type=float,
+        default=20.0,
+        help="Kill-switch: halt trading if daily realized loss exceeds this (USD). Live/dry-run only.",
+    )
     args = parser.parse_args()
 
     # Resolve --no-flips and auto-default for min-flip-strength
@@ -1178,8 +1293,9 @@ async def main():
     elif args.min_flip_strength == 0:
         args.min_flip_strength = args.min_signal_strength + 2
 
+    mode_label = {"paper": "PAPER (no real money)", "live": "LIVE (REAL MONEY)", "dry-run": "DRY-RUN (live logic, no orders)"}
     print("=" * 90)
-    print("  LIVE TRADING BOT — WebSocket-First (Config N — quality-first)")
+    print(f"  TRADING BOT — WebSocket-First | MODE: {mode_label[args.mode]}")
     print("=" * 90)
     print(f"  Duration:     {args.duration_min} minutes")
     if args.max_cycles > 0:
@@ -1217,11 +1333,38 @@ async def main():
     else:
         print(f"  Book gate:    DISABLED")
     print(f"  Voting:       weighted (2.0x OOS>=80%, 1.0x 60-80%, 0.5x <60%)")
-    print(f"  Mode:         PAPER (no real money)")
+    if args.mode != "paper":
+        print(f"  Daily loss:   -${args.max_daily_loss:.0f} kill switch")
+    print(f"  Mode:         {mode_label[args.mode]}")
     print(f"  Polling:      {BASELINE_POLL_INTERVAL}s baseline + burst-triggered HTTP")
     print(f"  Burst thresh: {BURST_TRADE_THRESHOLD} trades in {BURST_LOOKBACK_SEC}s")
     print(f"  Price source: WebSocket real-time (used for entry pricing)")
     print("=" * 90)
+
+    # --- Initialize infrastructure ---
+    clob_client = None
+    position_store = None
+    risk_mgr = None
+
+    if args.mode in ("live", "dry-run"):
+        if not _LIVE_TRADING_AVAILABLE:
+            print(
+                "\n  ERROR: Live trading deps not installed."
+                "\n  Run: pip install py-clob-client eth-account python-dotenv"
+                "\n  Then set credentials in .env (see polymarket/clients/clob_order_client.py)"
+            )
+            return
+        risk_mgr = RiskManager(RiskLimits(max_daily_loss_usd=args.max_daily_loss))
+        position_store = PositionStore()
+        if position_store.has_open_position():
+            pos = position_store.state.active_position
+            print(f"\n  WARNING: open position from previous session: {pos.side} {pos.market_slug}")
+            print(f"  The bot will NOT manage this position. Resolve it manually or clear data/live_position.json")
+        if args.mode == "live":
+            clob_client = ClobOrderClient()
+            print(f"\n  CLOB client initialized — REAL ORDERS WILL BE SUBMITTED")
+        else:
+            print(f"\n  DRY-RUN mode — will print 'WOULD PLACE' without submitting")
 
     print("\n[1/3] Loading smart wallets...")
     smart_wallet_weights = load_smart_wallets()
@@ -1257,6 +1400,19 @@ async def main():
                 await asyncio.sleep(5)
                 continue
 
+            # --- Pre-market risk checks (live/dry-run only) ---
+            if risk_mgr is not None:
+                ok, reason = risk_mgr.check_kill_switch()
+                if not ok:
+                    print(f"\n  KILL SWITCH: {reason}")
+                    break
+                ok, reason = risk_mgr.check_daily_loss(
+                    position_store.get_daily_pnl() if position_store else 0
+                )
+                if not ok:
+                    print(f"\n  DAILY LOSS LIMIT: {reason}")
+                    break
+
             market_count += 1
             print(f"\n========== Market {market_count} ==========", flush=True)
             result = await trade_one_market(
@@ -1283,6 +1439,10 @@ async def main():
                 position_size_usd=args.position_size,
                 min_book_depth_usd=args.min_book_depth,
                 book_depth_window=args.book_depth_window,
+                trading_mode=args.mode,
+                clob_client=clob_client,
+                position_store=position_store,
+                risk_manager=risk_mgr,
             )
             results.append(result)
 
