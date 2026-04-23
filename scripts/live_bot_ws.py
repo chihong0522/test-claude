@@ -144,8 +144,8 @@ class MarketTradingState:
     # Strategy params (Config N — quality-first)
     min_signal_strength: int = 7  # distinct wallets (not raw votes)
     signal_dominance: float = 2.0
-    min_seconds_remaining: int = 180  # time gate: only fire with >= 3 min left
-    max_bucket_age_sec: int = 30  # staleness gate: skip buckets older than this when we poll them
+    min_seconds_remaining: int = 60  # time gate: only fire with >= 1 min left
+    max_bucket_age_sec: int = 60  # staleness gate: skip buckets older than this when we poll them
     position_size_usd: float = 60.0  # BASE stake; see differential sizing below
     fee_pct: float = 0.02
 
@@ -160,7 +160,7 @@ class MarketTradingState:
     sizing_very_low_mult: float = 1.5   # entry <= sizing_very_low_max (juicy asymmetry)
     sizing_normal_mult: float = 1.0     # entry in (very_low_max, normal_max]
     sizing_moderate_mult: float = 0.5   # entry in (normal_max, moderate_max]
-    sizing_expensive_mult: float = 0.25  # entry > moderate_max (poor asymmetry)
+    sizing_expensive_mult: float = 0.0  # entry > moderate_max: SKIP (structurally unfavorable)
     sizing_very_low_max: float = 0.20
     sizing_normal_max: float = 0.40
     sizing_moderate_max: float = 0.60
@@ -567,6 +567,18 @@ def process_voting(state: MarketTradingState, now_ts: int):
 
         if state.position is None:
             stake_usd, tier = compute_stake(state, our_entry_price)
+            if stake_usd <= 0:
+                state.actions.append(
+                    {
+                        "bucket": bi,
+                        "action": "SKIP_TIER",
+                        "side": signal,
+                        "price": round(our_entry_price, 4),
+                        "reason": f"expensive tier rejected (entry={our_entry_price:.2f})",
+                        "ts": now_ts,
+                    }
+                )
+                continue
             size = stake_usd / our_entry_price
             cost = stake_usd * (1 + state.fee_pct)
             state.position = (signal, our_entry_price, size, cost)
@@ -952,6 +964,10 @@ async def trade_one_market(
                 f"    b{a['bucket']:3d}: SKIP_DEPTH {side} "
                 f"(votes {a.get('yes_wallets', 0)}Y/{a.get('no_wallets', 0)}N) — {a.get('reason', '')}"
             )
+        elif action == "SKIP_TIER":
+            print(
+                f"    b{a['bucket']:3d}: SKIP_TIER  {side} @ {a.get('price', 0):.2f} — {a.get('reason', '')}"
+            )
         else:
             print(f"    b{a['bucket']:3d}: {action}")
 
@@ -1018,7 +1034,7 @@ async def main():
     parser.add_argument(
         "--min-seconds-remaining",
         type=int,
-        default=180,
+        default=60,
         help="Reject signals with < N seconds remaining in the 5-min window",
     )
     parser.add_argument(
@@ -1030,7 +1046,7 @@ async def main():
     parser.add_argument(
         "--max-bucket-age-sec",
         type=int,
-        default=30,
+        default=60,
         help=(
             "Staleness gate: skip buckets whose end was >N seconds ago. "
             "Prevents the bot from replaying a bucket-2 signal minutes later "
@@ -1081,8 +1097,13 @@ async def main():
     parser.add_argument(
         "--stop-loss",
         type=float,
-        default=0.25,
-        help="Sell when our side's price has dropped by this much since entry",
+        default=1.0,
+        help=(
+            "Sell when our side's price has dropped by this much since entry. "
+            "Default 1.0 effectively disables (price can't move >1.0). "
+            "30-cycle data showed 3/3 stop-losses were losers; 2/3 killed "
+            "correct positions. Use 0.25 to re-enable."
+        ),
     )
     parser.add_argument(
         "--stop-loss-min-remaining",
@@ -1131,7 +1152,7 @@ async def main():
     parser.add_argument(
         "--min-book-depth",
         type=float,
-        default=150.0,
+        default=0,
         help=(
             "Minimum USD notional of resting ASK size (within "
             "--book-depth-window of best ask) required on our side before "
