@@ -395,9 +395,18 @@ def check_exit_signal(state: MarketTradingState, now_ts: int) -> str | None:
     if delta >= state.profit_take_threshold:
         return f"profit_take (+{delta:.2f})"
 
-    # Rule 2 — stop-loss (only meaningful while there's time for further adverse move)
-    if delta <= -state.stop_loss_threshold and time_to_close >= state.stop_loss_min_remaining:
-        return f"stop_loss ({delta:.2f})"
+    # Rule 2 — stop-loss (only meaningful while there's time for further adverse move).
+    # The stop-loss is asymmetric in entry price: a −0.25 absolute delta
+    # works for mid-range entries (~0.30-0.70), but is too tight for
+    # high-entry trades. At entry 0.88, a −0.25 stop fires at 0.63, which
+    # triggers on normal noise; we saw this in Run-8 Cycle 4 where a NO
+    # signal at 0.88 had an intraday wick to 0.01 and stopped out, even
+    # though the market resolved DOWN (NO won) for a would-be +$1.75 gain.
+    # For high entries, widen the stop: if base threshold < 50% of entry,
+    # use 50% of entry instead (gives wiggle room proportional to conviction).
+    effective_stop = max(state.stop_loss_threshold, entry_price * 0.5)
+    if delta <= -effective_stop and time_to_close >= state.stop_loss_min_remaining:
+        return f"stop_loss ({delta:.2f}, gate=-{effective_stop:.2f})"
 
     # Rule 3 — late-window de-risking
     if time_to_close <= state.late_window_sec and current_our_price < state.late_window_min_price:
