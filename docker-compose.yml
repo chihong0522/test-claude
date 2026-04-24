@@ -1,34 +1,53 @@
-version: "3.9"
-
 services:
-  app:
+  # ── Trading Bot ──────────────────────────────────────────────
+  bot:
     build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - PM_DATABASE_URL=postgresql+asyncpg://polymarket:polymarket@postgres:5432/polymarket_research
-      - PM_DISCORD_WEBHOOK_URL=${PM_DISCORD_WEBHOOK_URL:-}
-      - PM_PIPELINE_SCHEDULE_HOUR=6
-      - PM_PIPELINE_SCHEDULE_MINUTE=0
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      - POSTGRES_USER=polymarket
-      - POSTGRES_PASSWORD=polymarket
-      - POSTGRES_DB=polymarket_research
+    container_name: polymarket-bot
+    env_file: .env
     volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U polymarket"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      - ./data:/app/data              # persist wallet pool + position state + logs
+      - ./KILL:/app/KILL:ro           # touch KILL on host → bot halts (optional)
     restart: unless-stopped
 
-volumes:
-  pgdata:
+    # ▸ Paper mode (default — no real money)
+    command: >
+      --mode paper
+      --duration-min 1440
+      --max-cycles 0
+
+    # ▸ Dry-run mode (uncomment to test live logic without orders)
+    # command: >
+    #   --mode dry-run
+    #   --duration-min 1440
+    #   --max-cycles 0
+    #   --position-size 15
+
+    # ▸ Live mode (uncomment ONLY when ready for real money)
+    # command: >
+    #   --mode live
+    #   --duration-min 1440
+    #   --max-cycles 0
+    #   --position-size 15
+    #   --max-daily-loss 10
+
+  # ── Paper Test Worker (continuous, writes results to data/) ──
+  paper-test:
+    build: .
+    container_name: polymarket-paper-test
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    command: >
+      --mode paper
+      --duration-min 14400
+      --max-cycles 0
+
+  # ── Wallet Pool Refresh (every 6 hours) ─────────────────────
+  refresh:
+    build: .
+    container_name: polymarket-refresh
+    entrypoint: ["python", "-u", "-m", "scripts.refresh_smart_wallets"]
+    command: ["--freshness-hours", "48"]
+    volumes:
+      - ./data:/app/data
+    profiles: ["refresh"]             # run manually: docker compose run refresh

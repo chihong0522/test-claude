@@ -1,0 +1,10 @@
+.git
+.env
+__pycache__
+*.pyc
+data/live_paper/
+data/smart_wallets_history/
+.ruff_cache
+.mypy_cache
+.pytest_cache
+KILL
