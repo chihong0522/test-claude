@@ -74,7 +74,13 @@ class BaseClient:
             try:
                 resp = await self._client.get(path, params=params)
                 if resp.status_code == 429:
-                    retry_after = float(resp.headers.get("Retry-After", backoff))
+                    retry_after_raw = resp.headers.get("Retry-After")
+                    try:
+                        retry_after = float(retry_after_raw) if retry_after_raw is not None else backoff
+                    except (TypeError, ValueError):
+                        retry_after = backoff
+                    retry_after = max(retry_after, backoff, 0.5)
+                    last_exc = RuntimeError(f"Rate limited on {path}")
                     logger.warning("Rate limited on %s, waiting %.1fs", path, retry_after)
                     await asyncio.sleep(retry_after)
                     backoff = min(backoff * BACKOFF_FACTOR, MAX_BACKOFF)
