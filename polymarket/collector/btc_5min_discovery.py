@@ -16,6 +16,8 @@ import time
 from datetime import datetime
 from typing import Any
 
+import httpx
+
 from polymarket.clients.data_api import DataAPIClient
 from polymarket.clients.gamma import GammaClient
 
@@ -23,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 BTC_5MIN_TICKER = "btc-updown-5m"
 FIVE_MIN = 300  # seconds
+TRADE_PAGE_RETRIES = 2
 
 
 def _parse_outcome_prices(raw: Any) -> list[float]:
@@ -156,11 +159,52 @@ async def _fetch_all_trades_for_market(
     all_trades: list[dict] = []
     for page in range(max_pages):
         offset = page * page_size
-        try:
-            batch = await data_api.get_trades(market=condition_id, limit=page_size, offset=offset)
-        except Exception:
-            # Hit offset cap — return what we have
-            break
+        batch: list[dict] = []
+        for attempt in range(1, TRADE_PAGE_RETRIES + 1):
+            try:
+                batch = await data_api.get_trades(market=condition_id, limit=page_size, offset=offset)
+                break
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 400:
+                    logger.debug("Trade pagination hit offset cap for %s at offset %d", condition_id[:10], offset)
+                    return all_trades
+                if attempt == TRADE_PAGE_RETRIES:
+                    if all_trades:
+                        logger.warning(
+                            "Stopping trade pagination for %s at offset %d after repeated HTTP %d; keeping %d earlier trades",
+                            condition_id[:10],
+                            offset,
+                            exc.response.status_code,
+                            len(all_trades),
+                        )
+                        return all_trades
+                    raise
+                wait = float(attempt)
+                logger.warning(
+                    "Retrying trades page for %s at offset %d after HTTP %d",
+                    condition_id[:10],
+                    offset,
+                    exc.response.status_code,
+                )
+                await asyncio.sleep(wait)
+            except Exception:
+                if attempt == TRADE_PAGE_RETRIES:
+                    if all_trades:
+                        logger.warning(
+                            "Stopping trade pagination for %s at offset %d after repeated transient failure; keeping %d earlier trades",
+                            condition_id[:10],
+                            offset,
+                            len(all_trades),
+                        )
+                        return all_trades
+                    raise
+                wait = float(attempt)
+                logger.warning(
+                    "Retrying trades page for %s at offset %d after transient failure",
+                    condition_id[:10],
+                    offset,
+                )
+                await asyncio.sleep(wait)
         if not batch:
             break
         all_trades.extend(batch)
