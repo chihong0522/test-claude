@@ -288,6 +288,34 @@ def record_ws_trade_event(state: MarketTradingState, ev: WSEvent) -> bool:
     return False
 
 
+def get_entry_price(state: MarketTradingState, signal: str) -> float:
+    """Best executable entry price for the side we want to buy.
+
+    Prefer the current best ask from the orderbook because that is the price a
+    real limit-at-touch order would actually pay. Fall back to the synthetic WS
+    price if we do not yet have a book snapshot.
+    """
+    asks = state.up_book_asks if signal == "YES" else state.down_book_asks
+    if asks and asks[0][0] > 0:
+        return asks[0][0]
+    current_up = state.ws_latest_up_price
+    return current_up if signal == "YES" else 1.0 - current_up
+
+
+def get_exit_price(state: MarketTradingState, side: str) -> float:
+    """Best executable exit price for the side we currently hold.
+
+    Exits should be marked to the best bid because selling into the book
+    realizes bid, not mid/last. Fall back to the synthetic WS price if we do
+    not yet have a bid snapshot.
+    """
+    bids = state.up_book_bids if side == "YES" else state.down_book_bids
+    if bids and bids[0][0] > 0:
+        return bids[0][0]
+    current_up = state.ws_latest_up_price
+    return current_up if side == "YES" else 1.0 - current_up
+
+
 async def poll_http_trades(
     data_api: DataAPIClient,
     state: MarketTradingState,
@@ -394,10 +422,9 @@ def check_exit_signal(state: MarketTradingState, now_ts: int) -> str | None:
         return None
 
     side, entry_price, _size, _cost = state.position
-    current_up = state.ws_latest_up_price
-    if current_up <= 0:  # no WS price yet
+    if state.ws_latest_up_price <= 0:  # no WS price yet
         return None
-    current_our_price = current_up if side == "YES" else 1.0 - current_up
+    current_our_price = get_exit_price(state, side)
     delta = current_our_price - entry_price  # positive = profitable
     time_to_close = state.end_ts - now_ts
 
@@ -425,13 +452,12 @@ def check_exit_signal(state: MarketTradingState, now_ts: int) -> str | None:
 
 
 def execute_exit(state: MarketTradingState, now_ts: int, reason: str) -> None:
-    """Close the current position at current WS mid, book P&L to realized_pnl,
+    """Close the current position at the best executable sell price, book P&L,
     mark the market as exited so no re-entry happens."""
     if state.position is None:
         return
     side, entry_price, size, cost = state.position
-    current_up = state.ws_latest_up_price
-    current_our_price = current_up if side == "YES" else 1.0 - current_up
+    current_our_price = get_exit_price(state, side)
     proceeds = size * current_our_price * (1 - state.fee_pct)
     state.realized_pnl += proceeds - cost
     state.exited = True
@@ -551,9 +577,10 @@ def process_voting(state: MarketTradingState, now_ts: int):
         if signal is None:
             continue
 
-        # USE WEBSOCKET REAL-TIME PRICE, not historical bucket price
+        # Use the current executable best ask, not historical bucket price.
+        # This keeps paper/live aligned with what we can actually pay.
         current_up = state.ws_latest_up_price
-        our_entry_price = current_up if signal == "YES" else 1.0 - current_up
+        our_entry_price = get_entry_price(state, signal)
         if our_entry_price < 0.05 or our_entry_price > 0.95:
             continue
 
@@ -658,10 +685,22 @@ def process_voting(state: MarketTradingState, now_ts: int):
 
             # All gates passed — execute the flip
             _, old_entry, old_size, old_cost = state.position
-            old_current = current_up if old_side == "YES" else 1.0 - current_up
+            old_current = get_exit_price(state, old_side)
             proceeds = old_size * old_current * (1 - state.fee_pct)
-            state.realized_pnl += proceeds - old_cost
             stake_usd, tier = compute_stake(state, our_entry_price)
+            if stake_usd <= 0:
+                state.actions.append(
+                    {
+                        "bucket": bi,
+                        "action": "SKIP_TIER",
+                        "side": signal,
+                        "price": round(our_entry_price, 4),
+                        "reason": f"expensive tier rejected (entry={our_entry_price:.2f})",
+                        "ts": now_ts,
+                    }
+                )
+                continue
+            state.realized_pnl += proceeds - old_cost
             new_size = stake_usd / our_entry_price
             new_cost = stake_usd * (1 + state.fee_pct)
             state.position = (signal, our_entry_price, new_size, new_cost)
@@ -773,7 +812,7 @@ async def trade_one_market(
     smart_wallet_weights: dict[str, float],
     confusion_detector: ConfusionDetector,
     min_signal_strength: int = 7,
-    min_seconds_remaining: int = 180,
+    min_seconds_remaining: int = 60,
     max_bucket_age_sec: int = 30,
     min_flip_strength: int = 9,
     flip_cooldown_sec: int = 60,
@@ -965,7 +1004,7 @@ async def trade_one_market(
                 if reason is not None:
                     side_before = state.position[0]
                     size_before = state.position[2]
-                    exit_price = state.ws_latest_up_price if side_before == "YES" else 1 - state.ws_latest_up_price
+                    exit_price = get_exit_price(state, side_before)
                     print(
                         f"    [{_fmt_ts(now_int)}] EXIT {side_before} "
                         f"@ {exit_price:.3f} — {reason}",
@@ -1255,7 +1294,7 @@ async def main():
     parser.add_argument(
         "--min-book-depth",
         type=float,
-        default=0,
+        default=150.0,
         help=(
             "Minimum USD notional of resting ASK size (within "
             "--book-depth-window of best ask) required on our side before "

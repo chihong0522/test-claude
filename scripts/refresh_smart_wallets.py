@@ -174,7 +174,7 @@ async def main():
     parser.add_argument(
         "--min-seconds-remaining",
         type=int,
-        default=180,
+        default=60,
         help="Only count signals fired with >= N seconds remaining (matches live bot)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Don't save output")

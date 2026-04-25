@@ -280,7 +280,7 @@ def validate_oos(
     min_distinct_wallets: int = 7,
     signal_dominance: float = 2.0,
     bucket_sec: int = 10,
-    min_seconds_remaining: int = 180,
+    min_seconds_remaining: int = 60,
     min_oos_accuracy: float = 0.52,
     min_oos_participations: int = 5,
 ) -> list[WalletSignalMetrics]:
