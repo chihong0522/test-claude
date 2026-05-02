@@ -62,6 +62,7 @@ def run_backtest(
     trades: list[dict],
     config: BacktestConfig | None = None,
     market_liquidity: dict[str, float] | None = None,
+    market_outcomes: dict[str, int] | None = None,
 ) -> BacktestResult:
     """Simulate copy-trading a wallet's trades.
 
@@ -69,9 +70,12 @@ def run_backtest(
         trades: Chronological list of trades from the target wallet.
         config: Backtest configuration.
         market_liquidity: {condition_id: liquidity_usd} for slippage estimation.
+        market_outcomes: Optional {condition_id: winning_outcome_index} map for
+            settling any still-open resolved positions at the end of the run.
     """
     cfg = config or BacktestConfig()
     market_liq = market_liquidity or {}
+    outcomes = market_outcomes or {}
 
     result = BacktestResult(
         config=cfg,
@@ -200,11 +204,16 @@ def run_backtest(
         equity_curve.append({"timestamp": ts, "equity": round(cash + pos_value_now, 2)})
 
     # ── Handle unresolved positions at end ───────────────────────────────
-    # Mark remaining positions at their last known price
-    pos_value_final = sum(
-        p["size"] * p.get("current_price", p["entry_price"])
-        for p in positions.values()
-    )
+    # If we know the market outcome, settle at binary resolution. Otherwise,
+    # fall back to the last known price as a mark-to-market estimate.
+    pos_value_final = 0.0
+    for pos_key, pos in positions.items():
+        condition_id = pos["condition_id"]
+        if condition_id in outcomes:
+            outcome_idx = int(pos_key.rsplit(":", 1)[1])
+            pos_value_final += pos["size"] * (1.0 if outcome_idx == outcomes[condition_id] else 0.0)
+        else:
+            pos_value_final += pos["size"] * pos.get("current_price", pos["entry_price"])
     result.final_capital = round(cash + pos_value_final, 2)
     result.equity_curve = equity_curve
 

@@ -1,0 +1,103 @@
+{
+  "source_report": ".hermes-team-cheapbounce/reports/portfolio_top5_7d_backtest.json",
+  "cache": ".hermes-team-cheapbounce/cache/btc5m_7d_2016.pkl",
+  "market_window_start": "2026-04-23T16:50:00Z",
+  "market_window_end": "2026-04-30T16:45:00Z",
+  "market_count": 2016,
+  "initial_capital": 5000.0,
+  "fill_probability_if_touched": 0.5,
+  "stake_per_level_usd": 50.0,
+  "fee_pct": 0.02,
+  "ranking_note": "Top 5 portfolio baskets selected from the 7-day passive-touch upper-bound study with 50% fill overlay.",
+  "top5_portfolios": [
+    {
+      "rank": 1,
+      "risk_level": "low",
+      "strategies": [
+        "micro_1235_tp020_t20",
+        "hybrid_5_8_10_13_tp015_t20",
+        "merged_07_23_tp03_t20"
+      ],
+      "expected_pnl": 6758.8,
+      "expected_final": 11758.8,
+      "reserved_capital": 867.0,
+      "idle_cash": 4133.0,
+      "expected_fills": 2494.5,
+      "win_rate": 76.29,
+      "mc_p10_final": 10903.4,
+      "mc_p50_final": 11739.67,
+      "mc_p90_final": 12632.02
+    },
+    {
+      "rank": 2,
+      "risk_level": "low",
+      "strategies": [
+        "micro_1235_tp020_t20",
+        "merged_07_21_tp05_t20",
+        "band_13_25_tp05_t20"
+      ],
+      "expected_pnl": 6396.49,
+      "expected_final": 11396.49,
+      "reserved_capital": 969.0,
+      "idle_cash": 4031.0,
+      "expected_fills": 3933.0,
+      "win_rate": 63.58,
+      "mc_p10_final": 10291.14,
+      "mc_p50_final": 11354.97,
+      "mc_p90_final": 12398.58
+    },
+    {
+      "rank": 3,
+      "risk_level": "low-mid",
+      "strategies": [
+        "micro_1235_tp020_t20",
+        "merged_07_21_tp05_t20",
+        "band_13_21_tp05_t20"
+      ],
+      "expected_pnl": 6077.55,
+      "expected_final": 11077.55,
+      "reserved_capital": 867.0,
+      "idle_cash": 4133.0,
+      "expected_fills": 2982.5,
+      "win_rate": 62.53,
+      "mc_p10_final": 10037.99,
+      "mc_p50_final": 11065.13,
+      "mc_p90_final": 12103.46
+    },
+    {
+      "rank": 4,
+      "risk_level": "mid",
+      "strategies": [
+        "merged_07_23_tp05_t20",
+        "band_13_25_tp05_t20"
+      ],
+      "expected_pnl": 4866.03,
+      "expected_final": 9866.03,
+      "reserved_capital": 816.0,
+      "idle_cash": 4184.0,
+      "expected_fills": 4334.5,
+      "win_rate": 64.06,
+      "mc_p10_final": 9023.41,
+      "mc_p50_final": 9853.98,
+      "mc_p90_final": 10719.97
+    },
+    {
+      "rank": 5,
+      "risk_level": "high",
+      "strategies": [
+        "micro_1235_tp015_t20",
+        "bounce_5810_tp012_t20",
+        "band_13_25_tp03_t20"
+      ],
+      "expected_pnl": 3936.69,
+      "expected_final": 8936.69,
+      "reserved_capital": 714.0,
+      "idle_cash": 4286.0,
+      "expected_fills": 2529.5,
+      "win_rate": 77.8,
+      "mc_p10_final": 8207.28,
+      "mc_p50_final": 8954.35,
+      "mc_p90_final": 9627.58
+    }
+  ]
+}

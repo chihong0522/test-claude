@@ -121,7 +121,18 @@ class BaseClient:
 
         for page in range(max_pages):
             params["offset"] = page * limit
-            data = await self.get(path, params)
+            try:
+                data = await self.get(path, params)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 400 and all_results:
+                    logger.warning(
+                        "Pagination hit HTTP 400 on %s at offset %d; keeping %d earlier results",
+                        path,
+                        params["offset"],
+                        len(all_results),
+                    )
+                    break
+                raise
             if isinstance(data, list):
                 items = data
             elif isinstance(data, dict):
